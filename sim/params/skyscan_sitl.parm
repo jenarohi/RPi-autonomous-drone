@@ -1,0 +1,45 @@
+# aerothon.parm - proximity + obstacle avoidance for the AeroTHON corridor run
+# Applied on top of copter.parm + gazebo-iris.parm.
+
+# --- proximity sensor: MAVLink OBSTACLE_DISTANCE, fed by lidar_bridge.py ---
+PRX1_TYPE        0
+PRX1_ORIENT      0
+PRX1_YAW_CORR    0
+# ignore nothing; the sim lidar is clean
+PRX1_IGN_ANG1    0
+PRX1_IGN_WID1    0
+
+# --- simple avoidance (stop/slide before hitting something) ---
+# bitmask 1 = UseProximitySensor  (fence bit off: no fence configured)
+AVOID_ENABLE     0
+# Margin must be SMALLER than half the narrowest gap the drone has to fly
+# through, or avoidance fights itself. Orange corridor: widest usable gap is
+# 2.15 m, so the best achievable clearance is 1.07 m per side. 1.0 m margin
+# made BendyRuler unable to satisfy its own constraint and it clipped obs2.
+AVOID_MARGIN     0.2
+AVOID_BEHAVE     0
+
+# --- object-avoidance path planning around obstacles in GUIDED/AUTO ---
+# 1 = BendyRuler: steers around, works with GUIDED position targets
+OA_TYPE          0
+OA_MARGIN_MAX    0.35
+OA_BR_LOOKAHEAD  4.0
+OA_BR_TYPE       1
+
+# --- second MAVLink port for the bridge (SITL SERIAL1 = TCP 5762) ---
+SERIAL1_PROTOCOL 2
+SERIAL1_BAUD     921
+
+# --- payload release servo on ch12 ---
+SERVO12_FUNCTION 0
+SERVO12_MIN      1100
+SERVO12_MAX      1900
+
+# Slow and gentle: BendyRuler only re-plans as fast as it gets proximity
+# updates (10 Hz). At 1.0 m/s it began its turn too late and clipped obs3,
+# whose gap is only 1.55 m wide. 0.5 m/s gives it time to commit to a gap.
+WPNAV_SPEED      50
+WPNAV_ACCEL      50
+WPNAV_JERK       2
+WPNAV_RADIUS     30
+ARMING_SKIPCHK   0

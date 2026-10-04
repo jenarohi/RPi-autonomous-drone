@@ -1,0 +1,88 @@
+# AeroTHON 2026 course: the ORIGINAL SkyScan world (legacy/create_world.py), kept exactly as it was.
+# One source of truth for three things: the Gazebo SDF (sim/build_world.py), the 2D map in the web UI and the
+# simulator ground-truth numbers. Nothing here was re-designed: every pose, size and colour is the legacy value.
+# tests/test_sim_course.py compares the generated SDF with legacy/aerothon_mission.sdf (the deployed world).
+#
+# Course frame (what the mission works in):  origin = where the drone sits at spawn, "fwd" = the way it faces,
+# "right" = to its right, "up" = height above ground.
+#   Gazebo world:  x = east, y = north.  The drone spawns at (-3, 3) facing east (+x, compass heading 90 deg).
+#   fwd = x - (-3)      right = -(y - 3)      up = z
+#
+# Layout (Gazebo x/y): drone (-3,3) -> start QR (0,3) -> green corridor x 6..16, y 1.25..4.75 straight ahead,
+# orange corridor x 6..16, y -1.25..-4.75 (with 3 obstacles) ahead-right, delivery zone x 19..59, y -15..15.
+
+name: aerothon_mission
+
+origin:
+  gz: [-3.0, 3.0, 0.0]
+  heading_deg: 90.0
+  spawn_z: 0.195                 # iris spawn height (legacy)
+
+objects:
+  # --- start area (Stage A) -------------------------------------------------------------------------------
+  - {id: start_qr, type: qr, label: "Start QR (DELIVERY-C)", fwd: 3.0, right: 0.0, up: 0.011,
+     size: [1.0, 1.0, 0.001], rgb: [1.0, 1.0, 1.0], texture: qr_start.png, content: "DELIVERY-C"}
+
+  # --- green corridor: 3.5 m wide, 10 m long, 5 m walls ---------------------------------------------------
+  - {id: green_floor, type: floor, label: "Green corridor floor", fwd: 14.0, right: 0.0, up: 0.005,
+     size: [10.0, 3.5, 0.01], rgb: [0.1, 0.8, 0.1], collision: true, corridor: green}
+  - {id: green_wL, type: wall, label: "Green corridor wall (left)", fwd: 14.0, right: -1.75, up: 2.5,
+     size: [10.0, 0.2, 5.0], rgb: [0.65, 0.65, 0.65], collision: true}
+  - {id: green_wR, type: wall, label: "Green corridor wall (right)", fwd: 14.0, right: 1.75, up: 2.5,
+     size: [10.0, 0.2, 5.0], rgb: [0.65, 0.65, 0.65], collision: true}
+
+  # --- orange corridor (return lap) with obstacles ---------------------------------------------------------
+  - {id: orange_floor, type: floor, label: "Orange corridor floor", fwd: 14.0, right: 6.0, up: 0.005,
+     size: [10.0, 3.5, 0.01], rgb: [0.95, 0.55, 0.05], collision: true, corridor: orange}
+  - {id: orange_wL, type: wall, label: "Orange corridor wall (left)", fwd: 14.0, right: 4.25, up: 2.5,
+     size: [10.0, 0.2, 5.0], rgb: [0.65, 0.65, 0.65], collision: true}
+  - {id: orange_wR, type: wall, label: "Orange corridor wall (right)", fwd: 14.0, right: 7.75, up: 2.5,
+     size: [10.0, 0.2, 5.0], rgb: [0.65, 0.65, 0.65], collision: true}
+  - {id: obs1, type: obstacle, label: "Obstacle 1", fwd: 12.0, right: 5.0, up: 2.5,
+     size: [0.4, 1.0, 5.0], rgb: [0.4, 0.4, 0.4], collision: true}
+  - {id: obs2, type: obstacle, label: "Obstacle 2", fwd: 14.0, right: 7.0, up: 2.5,
+     size: [0.4, 1.0, 5.0], rgb: [0.4, 0.4, 0.4], collision: true}
+  - {id: obs3, type: obstacle, label: "Obstacle 3", fwd: 16.0, right: 5.5, up: 2.5,
+     size: [0.4, 1.2, 5.0], rgb: [0.4, 0.4, 0.4], collision: true}
+
+  # --- delivery zone 40 m x 30 m (not used by Stage A) -----------------------------------------------------
+  - {id: dz_floor, type: zone, label: "Delivery zone", fwd: 42.0, right: 3.0, up: 0.003,
+     size: [40.0, 30.0, 0.005], rgb: [0.78, 0.78, 0.82]}
+  - {id: qr_a, type: qr, label: "Target QR A", fwd: 25.0, right: -7.0, up: 0.011,
+     size: [1.0, 1.0, 0.001], rgb: [1.0, 1.0, 1.0], texture: qr_a.png, content: "DELIVERY-A"}
+  - {id: qr_b, type: qr, label: "Target QR B", fwd: 33.0, right: 11.0, up: 0.011,
+     size: [1.0, 1.0, 0.001], rgb: [1.0, 1.0, 1.0], texture: qr_b.png, content: "DELIVERY-B"}
+  - {id: qr_c, type: qr, label: "Target QR C (match)", fwd: 41.0, right: -2.0, up: 0.011,
+     size: [1.0, 1.0, 0.001], rgb: [1.0, 1.0, 1.0], texture: qr_c.png, content: "DELIVERY-C"}
+  - {id: qr_d, type: qr, label: "Target QR D", fwd: 49.0, right: 15.0, up: 0.011,
+     size: [1.0, 1.0, 0.001], rgb: [1.0, 1.0, 1.0], texture: qr_d.png, content: "DELIVERY-D"}
+  - {id: qr_e, type: qr, label: "Target QR E", fwd: 57.0, right: -6.0, up: 0.011,
+     size: [1.0, 1.0, 0.001], rgb: [1.0, 1.0, 1.0], texture: qr_e.png, content: "DELIVERY-E"}
+  - {id: red1, type: restricted, label: "No-land zone 1", fwd: 29.0, right: -3.0, up: 0.008,
+     size: [3.0, 3.0, 0.005], rgb: [0.9, 0.1, 0.1]}
+  - {id: red2, type: restricted, label: "No-land zone 2", fwd: 47.0, right: 8.0, up: 0.008,
+     size: [3.0, 3.0, 0.005], rgb: [0.9, 0.1, 0.1]}
+
+# Used by the truth computer and the UI. entrance = [fwd, right] of the middle of the corridor's start line.
+corridors:
+  forward:
+    id: green
+    entrance: [9.0, 0.0]         # x = 6
+    axis_yaw_deg: 0.0            # corridor runs along the course heading
+    width_m: 3.5
+    length_m: 10.0
+    floor_id: green_floor
+  return:
+    id: orange
+    entrance: [19.0, 6.0]        # x = 16, flown back westwards
+    axis_yaw_deg: 180.0
+    width_m: 3.5
+    length_m: 10.0
+    floor_id: orange_floor
+
+# Extra (not part of the original world): a fixed camera so the UI can show a "Gazebo view" of the start area.
+overview_camera:
+  gz_pose: [4.0, -9.0, 8.0, 0.0, 0.55, 1.5708]    # x y z roll pitch yaw, looks north over the start area and corridors
+  hfov_deg: 75.0
+  size: [640, 480]
+  update_rate: 10

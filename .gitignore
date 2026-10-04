@@ -22,3 +22,9 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# SkyScan runtime
+.runtime/
+runs/
+config/*.local.yaml
+node_modules/

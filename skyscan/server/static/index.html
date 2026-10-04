@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SkyScan Mission Control · Axiom Dynamics</title>
+  <link rel="icon" type="image/png" href="/static/brand/favicon.png">
+  <link rel="apple-touch-icon" href="/static/brand/favicon-128.png">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="theme-light">
+  <!-- Top Bar -->
+  <header class="topbar">
+    <div class="brand">
+      <img class="brand-mark" src="/static/brand/axiom-mark.png" alt="Axiom Dynamics" width="34" height="35">
+      <div class="titles">
+        <h1>SKYSCAN MISSION CONTROL</h1>
+        <span class="subtitle">AEROTHON 2026 · TRACK 1 · MISSION 2</span>
+      </div>
+    </div>
+
+    <!-- Status Badges -->
+    <div class="top-status">
+      <div class="badge-group">
+        <span class="badge" id="badge-ws">WS: DISCONNECTED</span>
+        <span class="badge" id="badge-link">FC: NO LINK</span>
+        <span class="badge" id="badge-ekf">EKF: WAITING</span>
+        <span class="badge" id="badge-mode">MODE: UNKNOWN</span>
+        <span class="badge" id="badge-armed">DISARMED</span>
+        <span class="badge" id="badge-batt">BAT: --%</span>
+      </div>
+    </div>
+
+    <!-- Sim & Process Controls -->
+    <div class="sim-controls">
+      <span class="badge" id="badge-sim">SIM: DOWN</span>
+      <button class="btn btn-sm btn-outline" id="btn-sim-toggle" title="Start/Stop Sim Stack">Start Sim</button>
+      <button class="btn btn-sm btn-outline" id="btn-sim-restart" title="Restart Sim Stack">Restart</button>
+      <button class="btn btn-sm btn-outline" id="btn-gz-gui" title="Open Native Gazebo GUI Window">GZ GUI</button>
+    </div>
+
+    <!-- UI Preferences: Theme Switcher & Voice -->
+    <div class="header-right">
+      <div class="theme-switcher-box" title="Select Cockpit Theme">
+        <span class="theme-label">Theme</span>
+        <div class="theme-segmented">
+          <button class="theme-seg-btn" data-theme="light">☀️ Light</button>
+          <button class="theme-seg-btn" data-theme="pure-white">⚪ Pure White</button>
+          <button class="theme-seg-btn" data-theme="dark">🌙 Dark</button>
+        </div>
+      </div>
+      <button class="btn btn-sm btn-outline" id="btn-voice-toggle" title="Toggle Voice Callouts">🔊 Voice: ON</button>
+    </div>
+  </header>
+
+  <!-- Safety Command Ribbon -->
+  <div class="command-ribbon">
+    <div class="ribbon-left">
+      <button class="btn btn-primary btn-run" id="btn-run-stages">▶ RUN SELECTED</button>
+      <button class="btn btn-outline" id="btn-reset-mission">Reset Mission</button>
+    </div>
+    <div class="ribbon-right">
+      <button class="btn btn-warning" id="btn-hold">HOLD</button>
+      <button class="btn btn-info" id="btn-land">LAND</button>
+      <button class="btn btn-purple" id="btn-rtl">RTL</button>
+      <button class="btn btn-danger" id="btn-disarm">DISARM</button>
+    </div>
+  </div>
+
+  <!-- Main Grid Layout -->
+  <main class="dashboard-grid">
+    <!-- Left Panel: Mission Sequence & Stages -->
+    <section class="panel panel-stages">
+      <div class="panel-header">
+        <h2>MISSION STAGES (STAGE A)</h2>
+        <span class="run-status" id="run-status-text">IDLE</span>
+      </div>
+      <div class="stage-list" id="stage-list">
+        <!-- Dynamically rendered stages A1..A4 -->
+      </div>
+
+      <!-- Shared Mission Outputs -->
+      <div class="mission-outputs">
+        <h3>MISSION PRODUCTS</h3>
+        <div class="output-item">
+          <span class="lbl">Course Origin:</span>
+          <span class="val" id="out-origin">None</span>
+        </div>
+        <div class="output-item">
+          <span class="lbl">Start QR Decode:</span>
+          <span class="val" id="out-qr">None</span>
+        </div>
+        <div class="output-item">
+          <span class="lbl">Corridor Axis:</span>
+          <span class="val" id="out-corridor">None</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Center Panel: Visualization & Cameras -->
+    <section class="panel panel-center">
+      <div class="panel-tabs">
+        <button class="tab-btn active" data-tab="tab-map">2D COURSE MAP</button>
+        <button class="tab-btn" data-tab="tab-cams">LIVE CAMERAS</button>
+        <button class="tab-btn" data-tab="tab-gzweb">GAZEBO 3D</button>
+      </div>
+
+      <!-- Tab 1: 2D Course Map -->
+      <div class="tab-content active" id="tab-map">
+        <div class="canvas-container">
+          <canvas id="course-canvas" width="800" height="450"></canvas>
+          <div class="map-overlay">
+            <span id="map-drone-pos">Course: (0.0m, 0.0m, 0.0m)</span>
+            <span id="map-drone-truth">Truth: N/A</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab 2: Cameras -->
+      <div class="tab-content" id="tab-cams">
+        <div class="camera-grid">
+          <div class="cam-box">
+            <div class="cam-title">DOWN CAMERA (QR SCANNER)</div>
+            <div class="video-wrap">
+              <img id="cam-down" src="/video/down.mjpg" alt="Down Camera">
+              <canvas id="overlay-down" class="video-overlay"></canvas>
+            </div>
+            <div class="cam-footer" id="cam-down-status">FPS: -- · QR: Not found</div>
+          </div>
+          <div class="cam-box">
+            <div class="cam-title">FRONT CAMERA (BANNER DETECTOR)</div>
+            <div class="video-wrap">
+              <img id="cam-front" src="/video/front.mjpg" alt="Front Camera">
+              <canvas id="overlay-front" class="video-overlay"></canvas>
+            </div>
+            <div class="cam-footer" id="cam-front-status">FPS: -- · Banner: Not found</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab 3: Gazebo, embedded (gzweb 3D scene or the Gazebo overview camera) -->
+      <div class="tab-content" id="tab-gzweb">
+        <div class="gz3d-wrap">
+          <div id="gz-scene" class="gz-scene"></div>
+          <img id="gz-overview" draggable="false" class="gz-overview" alt="Gazebo overview camera" hidden>
+          <div class="gz3d-hud">
+            <span class="gz3d-chip" id="gz3d-status">GAZEBO · IDLE</span>
+            <div class="gz3d-actions">
+              <div class="theme-segmented" id="gz3d-mode">
+                <button class="theme-seg-btn active" data-mode="scene" title="Interactive 3D scene streamed from Gazebo">3D scene</button>
+                <button class="theme-seg-btn" data-mode="camera" title="Fixed camera rendered by Gazebo">Overview cam</button>
+              </div>
+              <button class="btn btn-xs btn-outline" id="gz3d-follow" title="Chase the drone">Follow drone</button>
+              <button class="btn btn-xs btn-outline" id="gz3d-reset" title="Reset the camera">Reset view</button>
+              <button class="btn btn-xs btn-outline" id="gz3d-reconnect" title="Reconnect to the Gazebo websocket">Reconnect</button>
+            </div>
+          </div>
+          <div class="gz3d-msg" id="gz3d-msg"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Right Panel: Telemetry Gauges -->
+    <section class="panel panel-telemetry">
+      <div class="panel-header">
+        <h2>FLIGHT TELEMETRY</h2>
+        <span class="telem-hz" id="telem-hz-indicator">10 Hz</span>
+      </div>
+
+      <div class="telemetry-grid">
+        <div class="telem-card">
+          <div class="lbl">REL ALTITUDE</div>
+          <div class="num" id="telem-alt">0.00 <small>m</small></div>
+        </div>
+        <div class="telem-card">
+          <div class="lbl">CLIMB RATE</div>
+          <div class="num" id="telem-climb">0.0 <small>m/s</small></div>
+        </div>
+        <div class="telem-card">
+          <div class="lbl">GROUNDSPEED</div>
+          <div class="num" id="telem-speed">0.0 <small>m/s</small></div>
+        </div>
+        <div class="telem-card">
+          <div class="lbl">HEADING (YAW)</div>
+          <div class="num" id="telem-yaw">000°</div>
+        </div>
+        <div class="telem-card">
+          <div class="lbl">ATTITUDE (R / P)</div>
+          <div class="num" id="telem-att">0.0° / 0.0°</div>
+        </div>
+        <div class="telem-card">
+          <div class="lbl">GIMBAL PITCH</div>
+          <div class="num" id="telem-gimbal">0.0°</div>
+        </div>
+      </div>
+
+      <!-- Attitude Indicator / Mini Horizon -->
+      <div class="horizon-box">
+        <canvas id="horizon-canvas" width="220" height="120"></canvas>
+      </div>
+
+      <!-- Position & GPS -->
+      <div class="coord-box">
+        <div class="coord-row"><span>NED:</span> <span id="telem-ned">(0.00, 0.00, 0.00)</span></div>
+        <div class="coord-row"><span>GPS:</span> <span id="telem-gps">No Fix (0 sats)</span></div>
+        <div class="coord-row"><span>EKF:</span> <span id="telem-ekf">Not converged</span></div>
+      </div>
+
+      <!-- Team mark -->
+      <div class="team-plate">
+        <img src="/static/brand/axiom-logo.png" alt="Axiom Dynamics" width="148" height="49">
+        <span>AeroTHON 2026 &middot; Track 1</span>
+      </div>
+    </section>
+  </main>
+
+  <!-- Bottom Log & Events Console -->
+  <footer class="bottom-console">
+    <div class="console-tabs">
+      <button class="console-tab-btn active" data-log="events">EVENTS FEED</button>
+      <button class="console-tab-btn" data-log="fc">FLIGHT CONTROLLER</button>
+      <button class="console-tab-btn" data-log="gazebo">GAZEBO LOG</button>
+      <button class="console-tab-btn" data-log="sitl">SITL LOG</button>
+      <div class="console-spacer"></div>
+      <button class="btn btn-xs btn-outline" id="btn-clear-logs">Clear</button>
+    </div>
+    <div class="console-body" id="console-output">
+      <!-- Live logs rendered here -->
+    </div>
+  </footer>
+
+  <script src="/static/app.js"></script>
+  <script src="/static/gazebo3d.js"></script>
+</body>
+</html>

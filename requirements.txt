@@ -1,0 +1,10 @@
+# SkyScan — Python 3.12 (robotics box venv: /opt/robotics/drone_env).
+# gz-transport13 / gz-msgs10 Python bindings come with Gazebo Harmonic (setup_drone.sh puts them on PYTHONPATH).
+aiohttp>=3.9
+numpy>=1.26
+opencv-python>=4.8        # the box venv has OpenCV 5.0
+pymavlink>=2.4.40
+pyzbar>=0.1.9             # needs the system libzbar0
+PyYAML>=6.0
+psutil>=5.9
+pytest>=7.4               # tests only
