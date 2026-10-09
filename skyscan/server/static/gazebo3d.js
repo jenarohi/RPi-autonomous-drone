@@ -76,7 +76,109 @@
     }
   }
 
+  // ── chase camera ("Follow drone") ──────────────────────────────────────────────────────────────────────────
+  // Third-person view behind and above the drone that turns with its heading only (roll / pitch would shake it),
+  // smoothed like a game chase cam. gzweb's own third-person follow applies the full attitude and looks at a fixed
+  // point 12 m ahead / 4 m aside, so it is not used. While following, drag orbits and the wheel zooms around the
+  // drone; the new angle / distance is kept relative to its heading.
+  const CHASE = { dist: 3.5, height: 1.4, lookUp: 0.3, yawRate: 3.0, posRate: 8.0 };
+  const C = { raf: 0, obj: null, t: null, yaw: 0, orbit: 0, dist: CHASE.dist, height: CHASE.height, user: false,
+    last: 0, lost: 0, onStart: null, onEnd: null };
+
+  function droneFrame(obj) {
+    obj.updateMatrixWorld();
+    const e = obj.matrixWorld.elements;          // column-major: x axis (e0, e1, e2), translation (e12, e13, e14)
+    return { x: e[12], y: e[13], z: e[14], yaw: Math.atan2(e[1], e[0]) };
+  }
+
+  function chaseStep(now) {
+    C.raf = requestAnimationFrame(chaseStep);
+    const sc = G.mgr && G.mgr.scene;
+    if (!sc || !sc.camera) return;
+    if (!C.obj || !C.obj.parent) {               // the model left the scene (sim restart): look it up again
+      C.obj = sc.scene.getObjectByName(VEHICLE) || null;
+      if (!C.obj) {
+        if (!C.lost) C.lost = now;
+        if (now - C.lost > 3000) { stopChase(); msg('Lost the drone in the 3D scene, so following stopped.'); }
+        return;
+      }
+    }
+    C.lost = 0;
+    const dt = Math.min(0.1, C.last ? (now - C.last) / 1000 : 0.016);
+    C.last = now;
+    const d = droneFrame(C.obj);
+    const goal = { x: d.x, y: d.y, z: d.z + CHASE.lookUp };
+    if (!C.t) { C.t = goal; C.yaw = d.yaw; }
+    const ky = 1 - Math.exp(-CHASE.yawRate * dt);
+    const kp = 1 - Math.exp(-CHASE.posRate * dt);
+    C.yaw += Math.atan2(Math.sin(d.yaw - C.yaw), Math.cos(d.yaw - C.yaw)) * ky;
+    const prev = C.t;
+    C.t = { x: prev.x + (goal.x - prev.x) * kp, y: prev.y + (goal.y - prev.y) * kp, z: prev.z + (goal.z - prev.z) * kp };
+    const cam = sc.camera;
+    if (C.user) {                                // mid-drag: carry the camera along with the drone, let the user orbit
+      cam.position.set(cam.position.x + C.t.x - prev.x, cam.position.y + C.t.y - prev.y,
+        cam.position.z + C.t.z - prev.z);
+    } else {
+      const a = C.yaw + Math.PI + C.orbit;
+      cam.position.set(C.t.x + Math.cos(a) * C.dist, C.t.y + Math.sin(a) * C.dist, C.t.z + C.height);
+    }
+    cam.up.set(0, 0, 1);
+    if (sc.controls) sc.controls.target.set(C.t.x, C.t.y, C.t.z);
+    cam.lookAt(C.t.x, C.t.y, C.t.z);
+  }
+
+  function chaseUserEnd() {                      // keep where the user left the camera, relative to the heading
+    C.user = false;
+    const sc = G.mgr && G.mgr.scene;
+    if (!sc || !C.t) return;
+    const dx = sc.camera.position.x - C.t.x, dy = sc.camera.position.y - C.t.y;
+    C.dist = Math.max(2, Math.min(80, Math.hypot(dx, dy)));
+    C.height = Math.max(-1, Math.min(60, sc.camera.position.z - C.t.z));
+    C.orbit = Math.atan2(dy, dx) - (C.yaw + Math.PI);
+  }
+
+  function startChase() {
+    const sc = G.mgr && G.mgr.scene;
+    const obj = sc && sc.scene && sc.scene.getObjectByName(VEHICLE);
+    if (!obj) {
+      msg('The drone is not in the 3D scene yet. Wait for <b>LIVE 3D</b> and try again.');
+      setTimeout(() => msg(''), 5000);
+      return false;
+    }
+    try { G.mgr.thirdPersonFollow(null); } catch (e) { /* gzweb follow already off */ }
+    Object.assign(C, { obj, t: null, orbit: 0, dist: CHASE.dist, height: CHASE.height, user: false, last: 0, lost: 0 });
+    if (sc.controls) {
+      C.onStart = () => { C.user = true; };
+      C.onEnd = chaseUserEnd;
+      sc.controls.addEventListener('start', C.onStart);
+      sc.controls.addEventListener('end', C.onEnd);
+    }
+    C.raf = requestAnimationFrame(chaseStep);
+    return true;
+  }
+
+  function stopChase(resetView) {
+    if (C.raf) cancelAnimationFrame(C.raf);
+    C.raf = 0;
+    const sc = G.mgr && G.mgr.scene;
+    if (sc && sc.controls && C.onStart) {
+      sc.controls.removeEventListener('start', C.onStart);
+      sc.controls.removeEventListener('end', C.onEnd);
+    }
+    C.onStart = C.onEnd = null;
+    C.obj = null;
+    if (resetView && G.mgr) {
+      try {
+        G.mgr.resetView();
+        if (sc.controls) sc.controls.target.copy(sc.defaultCameraLookAt);   // else the orbit centre stays on the drone
+      } catch (e) { /* not ready */ }
+    }
+    G.following = false;
+    updateFollowBtn();
+  }
+
   function teardown() {
+    stopChase(false);
     if (G.poll) { clearInterval(G.poll); G.poll = null; }
     if (G.mgr) {
       try { G.mgr.destroy(); } catch (e) { /* never connected: nothing to clean */ }
@@ -90,7 +192,10 @@
 
   function updateFollowBtn() {
     const b = $('gz3d-follow');
-    if (b) b.textContent = G.following ? 'Stop following' : 'Follow drone';
+    if (b) {
+      b.textContent = G.following ? 'Stop following' : 'Follow drone';
+      b.classList.toggle('active', G.following);
+    }
   }
 
   function useCameraFallback(reason) {
@@ -178,7 +283,7 @@
 
   function setMode(mode) {
     G.mode = mode;
-    document.querySelectorAll('#gz3d-mode .theme-seg-btn').forEach((b) =>
+    document.querySelectorAll('#gz3d-mode .seg-btn').forEach((b) =>
       b.classList.toggle('active', b.getAttribute('data-mode') === mode));
     const img = $('gz-overview');
     const scene = $('gz-scene');
@@ -232,21 +337,17 @@
   };
 
   window.addEventListener('DOMContentLoaded', () => {
-    document.querySelectorAll('#gz3d-mode .theme-seg-btn').forEach((b) =>
+    document.querySelectorAll('#gz3d-mode .seg-btn').forEach((b) =>
       b.addEventListener('click', () => setMode(b.getAttribute('data-mode'))));
     const follow = $('gz3d-follow');
     if (follow) follow.addEventListener('click', () => {
       if (!G.mgr) return;
-      G.following = !G.following;
-      try {
-        if (G.following) G.mgr.thirdPersonFollow(VEHICLE); else G.mgr.resetView();
-      } catch (e) { G.following = false; }
+      if (G.following) { stopChase(true); return; }
+      G.following = startChase();
       updateFollowBtn();
     });
     const reset = $('gz3d-reset');
-    if (reset) reset.addEventListener('click', () => {
-      if (G.mgr) { try { G.mgr.resetView(); } catch (e) { /* ignore */ } G.following = false; updateFollowBtn(); }
-    });
+    if (reset) reset.addEventListener('click', () => { if (G.mgr) stopChase(true); });
     const rec = $('gz3d-reconnect');
     if (rec) rec.addEventListener('click', () => {
       teardown();

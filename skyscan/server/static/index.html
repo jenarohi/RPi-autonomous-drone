@@ -3,109 +3,153 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SkyScan Mission Control · Axiom Dynamics</title>
+  <title>Axiom Dynamics Mission Control System</title>
   <link rel="icon" type="image/png" href="/static/brand/favicon.png">
   <link rel="apple-touch-icon" href="/static/brand/favicon-128.png">
   <link rel="stylesheet" href="/static/style.css">
+  <script>
+    /* theme before first paint: saved choice, else the system preference, else dark */
+    (function () {
+      var t = null;
+      try { t = localStorage.getItem('axiom_theme'); } catch (e) { /* storage blocked */ }
+      if (t !== 'light' && t !== 'dark') {
+        t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    })();
+  </script>
 </head>
-<body class="theme-light">
-  <!-- Top Bar -->
-  <header class="topbar">
+<body class="theme-dark">
+  <!-- icon sprite -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+    <defs>
+      <symbol id="i-flight" viewBox="0 0 32 32"><circle cx="16" cy="16" r="11"/><path d="M16 16l6-7"/><path d="M7 21h3M22 21h3M16 6v3"/></symbol>
+      <symbol id="i-cam" viewBox="0 0 32 32"><rect x="4" y="10" width="24" height="16"/><circle cx="16" cy="18" r="4.5"/><path d="M11 10l2-4h6l2 4"/></symbol>
+      <symbol id="i-cube" viewBox="0 0 32 32"><path d="M16 4l11 6v12l-11 6-11-6V10z"/><path d="M5 10l11 6 11-6M16 16v12"/></symbol>
+      <symbol id="i-run" viewBox="0 0 32 32"><path d="M9 6l16 10-16 10z" style="fill:currentColor"/></symbol>
+      <symbol id="i-stop" viewBox="0 0 32 32"><rect x="8" y="8" width="16" height="16" style="fill:currentColor"/></symbol>
+      <symbol id="i-reset" viewBox="0 0 32 32"><path d="M8 11a10 10 0 1 1-2 9"/><path d="M5 5v7h7"/></symbol>
+      <symbol id="i-hold" viewBox="0 0 32 32"><rect x="8" y="7" width="5" height="18" style="fill:currentColor"/><rect x="19" y="7" width="5" height="18" style="fill:currentColor"/></symbol>
+      <symbol id="i-land" viewBox="0 0 32 32"><path d="M16 4v17M9 15l7 7 7-7"/><path d="M5 27h22"/></symbol>
+      <symbol id="i-rtl" viewBox="0 0 32 32"><path d="M4 16L16 5l12 11"/><path d="M8 14v13h16V14"/><path d="M13 27v-8h6v8"/></symbol>
+      <symbol id="i-disarm" viewBox="0 0 32 32"><path d="M11 4h10l7 7v10l-7 7H11l-7-7V11z"/><path d="M11 11l10 10M21 11L11 21"/></symbol>
+      <symbol id="i-power" viewBox="0 0 32 32"><path d="M16 4v12"/><path d="M9 9a10 10 0 1 0 14 0"/></symbol>
+      <symbol id="i-restart" viewBox="0 0 32 32"><path d="M26 16a10 10 0 1 1-3-7"/><path d="M26 4v7h-7"/></symbol>
+      <symbol id="i-window" viewBox="0 0 32 32"><rect x="4" y="6" width="24" height="20"/><path d="M4 12h24"/></symbol>
+      <symbol id="i-dice" viewBox="0 0 32 32"><rect x="5" y="5" width="22" height="22" rx="3"/><circle cx="11" cy="11" r="1.6" style="fill:currentColor"/><circle cx="21" cy="11" r="1.6" style="fill:currentColor"/><circle cx="16" cy="16" r="1.6" style="fill:currentColor"/><circle cx="11" cy="21" r="1.6" style="fill:currentColor"/><circle cx="21" cy="21" r="1.6" style="fill:currentColor"/></symbol>
+      <symbol id="i-speaker" viewBox="0 0 32 32"><path d="M5 12h6l7-6v20l-7-6H5z"/><path d="M22 11a7 7 0 0 1 0 10"/></symbol>
+      <symbol id="i-mute" viewBox="0 0 32 32"><path d="M5 12h6l7-6v20l-7-6H5z"/><path d="M23 12l6 8M29 12l-6 8"/></symbol>
+    </defs>
+  </svg>
+
+  <!-- Title bar -->
+  <header class="titlebar">
     <div class="brand">
-      <img class="brand-mark" src="/static/brand/axiom-mark.png" alt="Axiom Dynamics" width="34" height="35">
+      <img class="brand-mark" src="/static/brand/axiom-mark.png" alt="Axiom Dynamics" width="30" height="31">
       <div class="titles">
-        <h1>SKYSCAN MISSION CONTROL</h1>
-        <span class="subtitle">AEROTHON 2026 · TRACK 1 · MISSION 2</span>
+        <h1>AXIOM DYNAMICS MISSION CONTROL SYSTEM</h1>
+        <span class="subtitle">AEROTHON 2026 &middot; TRACK 1 &middot; MISSION 2</span>
       </div>
     </div>
-
-    <!-- Status Badges -->
-    <div class="top-status">
-      <div class="badge-group">
-        <span class="badge" id="badge-ws">WS: DISCONNECTED</span>
-        <span class="badge" id="badge-link">FC: NO LINK</span>
-        <span class="badge" id="badge-ekf">EKF: WAITING</span>
-        <span class="badge" id="badge-mode">MODE: UNKNOWN</span>
-        <span class="badge" id="badge-armed">DISARMED</span>
-        <span class="badge" id="badge-batt">BAT: --%</span>
+    <div class="titlebar-right">
+      <span class="theme-label">THEME</span>
+      <div class="seg" id="theme-switch" role="group" aria-label="Colour theme">
+        <button class="seg-btn" data-theme="dark" aria-pressed="true">DARK</button>
+        <button class="seg-btn" data-theme="light" aria-pressed="false">LIGHT</button>
       </div>
-    </div>
-
-    <!-- Sim & Process Controls -->
-    <div class="sim-controls">
-      <span class="badge" id="badge-sim">SIM: DOWN</span>
-      <button class="btn btn-sm btn-outline" id="btn-sim-toggle" title="Start/Stop Sim Stack">Start Sim</button>
-      <button class="btn btn-sm btn-outline" id="btn-sim-restart" title="Restart Sim Stack">Restart</button>
-      <button class="btn btn-sm btn-outline" id="btn-gz-gui" title="Open Native Gazebo GUI Window">GZ GUI</button>
-    </div>
-
-    <!-- UI Preferences: Theme Switcher & Voice -->
-    <div class="header-right">
-      <div class="theme-switcher-box" title="Select Cockpit Theme">
-        <span class="theme-label">Theme</span>
-        <div class="theme-segmented">
-          <button class="theme-seg-btn" data-theme="light">☀️ Light</button>
-          <button class="theme-seg-btn" data-theme="pure-white">⚪ Pure White</button>
-          <button class="theme-seg-btn" data-theme="dark">🌙 Dark</button>
-        </div>
-      </div>
-      <button class="btn btn-sm btn-outline" id="btn-voice-toggle" title="Toggle Voice Callouts">🔊 Voice: ON</button>
     </div>
   </header>
 
-  <!-- Safety Command Ribbon -->
-  <div class="command-ribbon">
-    <div class="ribbon-left">
-      <button class="btn btn-primary btn-run" id="btn-run-stages">▶ RUN SELECTED</button>
-      <button class="btn btn-outline" id="btn-reset-mission">Reset Mission</button>
+  <!-- Toolbar: big icon + caption buttons -->
+  <nav class="toolbar" aria-label="Main toolbar">
+    <div class="tool-group" aria-label="Views">
+      <button class="tool-btn tab-btn active" data-tab="tab-map" title="2D course map with the live vehicle position">
+        <svg class="ico"><use href="#i-flight"/></svg><span>FLIGHT DATA</span></button>
+      <button class="tool-btn tab-btn" data-tab="tab-cams" title="Down and front camera feeds with detections">
+        <svg class="ico"><use href="#i-cam"/></svg><span>CAMERAS</span></button>
+      <button class="tool-btn tab-btn" data-tab="tab-gzweb" title="Gazebo 3D scene or overview camera">
+        <svg class="ico"><use href="#i-cube"/></svg><span>GAZEBO 3D</span></button>
     </div>
-    <div class="ribbon-right">
-      <button class="btn btn-warning" id="btn-hold">HOLD</button>
-      <button class="btn btn-info" id="btn-land">LAND</button>
-      <button class="btn btn-purple" id="btn-rtl">RTL</button>
-      <button class="btn btn-danger" id="btn-disarm">DISARM</button>
+
+    <div class="tool-group" aria-label="Mission">
+      <button class="tool-btn tool-run" id="btn-run-stages" title="Run every ticked stage in order">
+        <svg class="ico"><use href="#i-run"/></svg><span>RUN SELECTED</span></button>
+      <button class="tool-btn" id="btn-reset-mission" title="Clear mission outputs and stage states">
+        <svg class="ico"><use href="#i-reset"/></svg><span>RESET MISSION</span></button>
     </div>
+
+    <div class="tool-group" aria-label="Flight commands">
+      <button class="tool-btn tool-hold" id="btn-hold" title="Hold position">
+        <svg class="ico"><use href="#i-hold"/></svg><span>HOLD</span></button>
+      <button class="tool-btn tool-land" id="btn-land" title="Land here">
+        <svg class="ico"><use href="#i-land"/></svg><span>LAND</span></button>
+      <button class="tool-btn tool-rtl" id="btn-rtl" title="Return to launch">
+        <svg class="ico"><use href="#i-rtl"/></svg><span>RTL</span></button>
+      <button class="tool-btn tool-disarm" id="btn-disarm" title="Emergency disarm: motors stop">
+        <svg class="ico"><use href="#i-disarm"/></svg><span>DISARM</span></button>
+    </div>
+
+    <div class="tool-group" aria-label="Simulation">
+      <button class="tool-btn" id="btn-sim-toggle" title="Start or stop the Gazebo + SITL stack">
+        <svg class="ico"><use href="#i-power"/></svg><span>START SIM</span></button>
+      <button class="tool-btn" id="btn-sim-restart" title="Restart the Gazebo + SITL stack">
+        <svg class="ico"><use href="#i-restart"/></svg><span>RESTART SIM</span></button>
+      <button class="tool-btn" id="btn-gz-gui" title="Open the native Gazebo GUI window on the box">
+        <svg class="ico"><use href="#i-window"/></svg><span>GZ GUI</span></button>
+    </div>
+
+    <div class="tool-group" aria-label="Scenario">
+      <button class="tool-btn" id="btn-random" title="Random scenario: red zones, QR codes and the delivery target">
+        <svg class="ico"><use href="#i-dice"/></svg><span>RANDOM</span></button>
+    </div>
+
+    <div class="tool-group tool-group-last" aria-label="Preferences">
+      <button class="tool-btn" id="btn-voice-toggle" title="Toggle voice callouts">
+        <svg class="ico"><use href="#i-speaker"/></svg><span>VOICE: ON</span></button>
+    </div>
+  </nav>
+
+  <!-- Status strip -->
+  <div class="statusbar" role="status">
+    <span class="badge" id="badge-ws">WS: DISCONNECTED</span>
+    <span class="badge" id="badge-link">FC: NO LINK</span>
+    <span class="badge" id="badge-ekf">EKF: WAITING</span>
+    <span class="badge" id="badge-mode">MODE: UNKNOWN</span>
+    <span class="badge" id="badge-armed">DISARMED</span>
+    <span class="badge" id="badge-batt">BAT: --%</span>
+    <span class="badge" id="badge-sim">SIM: DOWN</span>
+    <span class="status-fill"></span>
+    <span class="run-label">RUN</span>
+    <span class="run-status" id="run-status-text">IDLE</span>
   </div>
 
-  <!-- Main Grid Layout -->
+  <!-- Main grid -->
   <main class="dashboard-grid">
-    <!-- Left Panel: Mission Sequence & Stages -->
+    <!-- Left: stages -->
     <section class="panel panel-stages">
-      <div class="panel-header">
-        <h2>MISSION STAGES (STAGE A)</h2>
-        <span class="run-status" id="run-status-text">IDLE</span>
-      </div>
+      <div class="strip"><h2>MISSION STAGES</h2><span class="strip-note">tick &middot; RUN</span></div>
       <div class="stage-list" id="stage-list">
-        <!-- Dynamically rendered stages A1..A4 -->
+        <!-- Stage cards are rendered from the server's stage list (A1..A4, B1..B4) -->
       </div>
 
-      <!-- Shared Mission Outputs -->
-      <div class="mission-outputs">
-        <h3>MISSION PRODUCTS</h3>
-        <div class="output-item">
-          <span class="lbl">Course Origin:</span>
-          <span class="val" id="out-origin">None</span>
-        </div>
-        <div class="output-item">
-          <span class="lbl">Start QR Decode:</span>
-          <span class="val" id="out-qr">None</span>
-        </div>
-        <div class="output-item">
-          <span class="lbl">Corridor Axis:</span>
-          <span class="val" id="out-corridor">None</span>
-        </div>
-      </div>
+      <div class="strip strip-sub"><h2>MISSION PRODUCTS</h2></div>
+      <table class="kv-table mission-outputs">
+        <tbody>
+          <tr><th>Course origin</th><td id="out-origin">None</td></tr>
+          <tr><th>Start QR decode</th><td id="out-qr">None</td></tr>
+          <tr><th>Corridor axis</th><td id="out-corridor">None</td></tr>
+          <tr><th>Delivery</th><td id="out-delivery">None</td></tr>
+          <tr><th>Return corridor</th><td id="out-return">None</td></tr>
+          <tr><th>Landing</th><td id="out-landing">None</td></tr>
+        </tbody>
+      </table>
     </section>
 
-    <!-- Center Panel: Visualization & Cameras -->
+    <!-- Centre: views -->
     <section class="panel panel-center">
-      <div class="panel-tabs">
-        <button class="tab-btn active" data-tab="tab-map">2D COURSE MAP</button>
-        <button class="tab-btn" data-tab="tab-cams">LIVE CAMERAS</button>
-        <button class="tab-btn" data-tab="tab-gzweb">GAZEBO 3D</button>
-      </div>
+      <div class="strip"><h2 id="center-title">FLIGHT DATA &middot; 2D COURSE MAP</h2></div>
 
-      <!-- Tab 1: 2D Course Map -->
+      <!-- View 1: 2D course map -->
       <div class="tab-content active" id="tab-map">
         <div class="canvas-container">
           <canvas id="course-canvas" width="800" height="450"></canvas>
@@ -116,7 +160,7 @@
         </div>
       </div>
 
-      <!-- Tab 2: Cameras -->
+      <!-- View 2: cameras -->
       <div class="tab-content" id="tab-cams">
         <div class="camera-grid">
           <div class="cam-box">
@@ -125,34 +169,34 @@
               <img id="cam-down" src="/video/down.mjpg" alt="Down Camera">
               <canvas id="overlay-down" class="video-overlay"></canvas>
             </div>
-            <div class="cam-footer" id="cam-down-status">FPS: -- · QR: Not found</div>
+            <div class="cam-footer" id="cam-down-status">FPS: -- &middot; QR: Not found</div>
           </div>
           <div class="cam-box">
-            <div class="cam-title">FRONT CAMERA (BANNER DETECTOR)</div>
+            <div class="cam-title">FRONT CAMERA (CORRIDOR DETECTOR)</div>
             <div class="video-wrap">
               <img id="cam-front" src="/video/front.mjpg" alt="Front Camera">
               <canvas id="overlay-front" class="video-overlay"></canvas>
             </div>
-            <div class="cam-footer" id="cam-front-status">FPS: -- · Banner: Not found</div>
+            <div class="cam-footer" id="cam-front-status">FPS: -- &middot; Banner: Not found</div>
           </div>
         </div>
       </div>
 
-      <!-- Tab 3: Gazebo, embedded (gzweb 3D scene or the Gazebo overview camera) -->
+      <!-- View 3: Gazebo, embedded (gzweb 3D scene or the Gazebo overview camera) -->
       <div class="tab-content" id="tab-gzweb">
         <div class="gz3d-wrap">
           <div id="gz-scene" class="gz-scene"></div>
           <img id="gz-overview" draggable="false" class="gz-overview" alt="Gazebo overview camera" hidden>
           <div class="gz3d-hud">
-            <span class="gz3d-chip" id="gz3d-status">GAZEBO · IDLE</span>
+            <span class="gz3d-chip" id="gz3d-status">GAZEBO &middot; IDLE</span>
             <div class="gz3d-actions">
-              <div class="theme-segmented" id="gz3d-mode">
-                <button class="theme-seg-btn active" data-mode="scene" title="Interactive 3D scene streamed from Gazebo">3D scene</button>
-                <button class="theme-seg-btn" data-mode="camera" title="Fixed camera rendered by Gazebo">Overview cam</button>
+              <div class="seg" id="gz3d-mode">
+                <button class="seg-btn active" data-mode="scene" title="Interactive 3D scene streamed from Gazebo">3D scene</button>
+                <button class="seg-btn" data-mode="camera" title="Fixed camera rendered by Gazebo">Overview cam</button>
               </div>
-              <button class="btn btn-xs btn-outline" id="gz3d-follow" title="Chase the drone">Follow drone</button>
-              <button class="btn btn-xs btn-outline" id="gz3d-reset" title="Reset the camera">Reset view</button>
-              <button class="btn btn-xs btn-outline" id="gz3d-reconnect" title="Reconnect to the Gazebo websocket">Reconnect</button>
+              <button class="btn btn-xs" id="gz3d-follow" title="Chase the drone">Follow drone</button>
+              <button class="btn btn-xs" id="gz3d-reset" title="Reset the camera">Reset view</button>
+              <button class="btn btn-xs" id="gz3d-reconnect" title="Reconnect to the Gazebo websocket">Reconnect</button>
             </div>
           </div>
           <div class="gz3d-msg" id="gz3d-msg"></div>
@@ -160,53 +204,31 @@
       </div>
     </section>
 
-    <!-- Right Panel: Telemetry Gauges -->
+    <!-- Right: telemetry -->
     <section class="panel panel-telemetry">
-      <div class="panel-header">
-        <h2>FLIGHT TELEMETRY</h2>
-        <span class="telem-hz" id="telem-hz-indicator">10 Hz</span>
-      </div>
+      <div class="strip"><h2>FLIGHT TELEMETRY</h2><span class="telem-hz" id="telem-hz-indicator">10 Hz</span></div>
 
       <div class="telemetry-grid">
-        <div class="telem-card">
-          <div class="lbl">REL ALTITUDE</div>
-          <div class="num" id="telem-alt">0.00 <small>m</small></div>
-        </div>
-        <div class="telem-card">
-          <div class="lbl">CLIMB RATE</div>
-          <div class="num" id="telem-climb">0.0 <small>m/s</small></div>
-        </div>
-        <div class="telem-card">
-          <div class="lbl">GROUNDSPEED</div>
-          <div class="num" id="telem-speed">0.0 <small>m/s</small></div>
-        </div>
-        <div class="telem-card">
-          <div class="lbl">HEADING (YAW)</div>
-          <div class="num" id="telem-yaw">000°</div>
-        </div>
-        <div class="telem-card">
-          <div class="lbl">ATTITUDE (R / P)</div>
-          <div class="num" id="telem-att">0.0° / 0.0°</div>
-        </div>
-        <div class="telem-card">
-          <div class="lbl">GIMBAL PITCH</div>
-          <div class="num" id="telem-gimbal">0.0°</div>
-        </div>
+        <div class="telem-card"><div class="lbl">REL ALTITUDE</div><div class="num" id="telem-alt">0.00 <small>m</small></div></div>
+        <div class="telem-card"><div class="lbl">CLIMB RATE</div><div class="num" id="telem-climb">0.0 <small>m/s</small></div></div>
+        <div class="telem-card"><div class="lbl">GROUNDSPEED</div><div class="num" id="telem-speed">0.0 <small>m/s</small></div></div>
+        <div class="telem-card"><div class="lbl">HEADING (YAW)</div><div class="num" id="telem-yaw">000&deg;</div></div>
+        <div class="telem-card"><div class="lbl">ATTITUDE (R / P)</div><div class="num" id="telem-att">0.0&deg; / 0.0&deg;</div></div>
+        <div class="telem-card"><div class="lbl">GIMBAL PITCH</div><div class="num" id="telem-gimbal">0.0&deg;</div></div>
       </div>
 
-      <!-- Attitude Indicator / Mini Horizon -->
       <div class="horizon-box">
         <canvas id="horizon-canvas" width="220" height="120"></canvas>
       </div>
 
-      <!-- Position & GPS -->
-      <div class="coord-box">
-        <div class="coord-row"><span>NED:</span> <span id="telem-ned">(0.00, 0.00, 0.00)</span></div>
-        <div class="coord-row"><span>GPS:</span> <span id="telem-gps">No Fix (0 sats)</span></div>
-        <div class="coord-row"><span>EKF:</span> <span id="telem-ekf">Not converged</span></div>
-      </div>
+      <table class="kv-table coord-box">
+        <tbody>
+          <tr><th>NED</th><td id="telem-ned">(0.00, 0.00, 0.00)</td></tr>
+          <tr><th>GPS</th><td id="telem-gps">No Fix (0 sats)</td></tr>
+          <tr><th>EKF</th><td id="telem-ekf">Not converged</td></tr>
+        </tbody>
+      </table>
 
-      <!-- Team mark -->
       <div class="team-plate">
         <img src="/static/brand/axiom-logo.png" alt="Axiom Dynamics" width="148" height="49">
         <span>AeroTHON 2026 &middot; Track 1</span>
@@ -214,21 +236,120 @@
     </section>
   </main>
 
-  <!-- Bottom Log & Events Console -->
+  <!-- Bottom: log console (75%) + lidar view (25%) -->
   <footer class="bottom-console">
-    <div class="console-tabs">
-      <button class="console-tab-btn active" data-log="events">EVENTS FEED</button>
-      <button class="console-tab-btn" data-log="fc">FLIGHT CONTROLLER</button>
-      <button class="console-tab-btn" data-log="gazebo">GAZEBO LOG</button>
-      <button class="console-tab-btn" data-log="sitl">SITL LOG</button>
-      <div class="console-spacer"></div>
-      <button class="btn btn-xs btn-outline" id="btn-clear-logs">Clear</button>
+    <div class="console-main">
+      <div class="console-tabs">
+        <button class="console-tab-btn active" data-log="events">EVENTS FEED</button>
+        <button class="console-tab-btn" data-log="fc">FLIGHT CONTROLLER</button>
+        <button class="console-tab-btn" data-log="gazebo">GAZEBO LOG</button>
+        <button class="console-tab-btn" data-log="sitl">SITL LOG</button>
+        <div class="console-spacer"></div>
+        <button class="btn btn-xs" id="btn-clear-logs">Clear</button>
+      </div>
+      <div class="console-body" id="console-output">
+        <!-- Live logs rendered here -->
+      </div>
     </div>
-    <div class="console-body" id="console-output">
-      <!-- Live logs rendered here -->
-    </div>
+
+    <aside class="lidar-panel" id="lidar-panel" aria-label="Lidar view">
+      <div class="strip strip-lidar">
+        <h2>LIDAR</h2>
+        <span class="lidar-meta" id="lidar-meta">NO DATA</span>
+      </div>
+      <table class="lidar-stats">
+        <tbody>
+          <tr>
+            <th>NEAR</th><td id="lidar-near">--</td>
+            <th>L</th><td id="lidar-l">--</td>
+            <th>R</th><td id="lidar-r">--</td>
+            <th>W</th><td id="lidar-w">--</td>
+            <th>OFF</th><td id="lidar-off">--</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="lidar-view" id="lidar-view" title="Click to change the range">
+        <canvas id="lidar-canvas"></canvas>
+      </div>
+    </aside>
   </footer>
 
+
+  <!-- RANDOM scenario pop-up -->
+  <div id="rnd-modal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="rnd-title">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h2 id="rnd-title">RANDOM SCENARIO</h2>
+        <span class="modal-sub">Redraws the delivery zone in the simulator: red zones, QR codes and which one is the target.</span>
+        <button class="btn btn-xs" id="rnd-close" type="button" aria-label="Close">CLOSE</button>
+      </div>
+      <div class="modal-body">
+        <form id="rnd-form" class="rnd-form" autocomplete="off" onsubmit="return false">
+          <fieldset>
+            <legend>SEED</legend>
+            <div class="rnd-row"><label for="rnd-seed">Seed</label>
+              <input id="rnd-seed" type="number" inputmode="numeric" placeholder="empty = a new one each time">
+              <button class="btn btn-xs" id="rnd-dice" type="button" title="Draw a new seed and preview it">NEW SEED</button></div>
+            <p class="rnd-hint">The same seed and settings always give the same course, so a run can be repeated.</p>
+          </fieldset>
+          <fieldset>
+            <legend>RED (NO-LAND) ZONES</legend>
+            <div class="rnd-row"><label>How many</label>
+              <input id="rnd-red-n0" type="number" min="0" max="8"><span>to</span><input id="rnd-red-n1" type="number" min="0" max="8"></div>
+            <div class="rnd-row"><label>Width (m)</label>
+              <input id="rnd-red-w0" type="number" step="0.5" min="0.5" max="12"><span>to</span><input id="rnd-red-w1" type="number" step="0.5" min="0.5" max="12"></div>
+            <div class="rnd-row"><label>Depth (m)</label>
+              <input id="rnd-red-d0" type="number" step="0.5" min="0.5" max="12"><span>to</span><input id="rnd-red-d1" type="number" step="0.5" min="0.5" max="12"></div>
+            <div class="rnd-row"><label>Max share of zone</label>
+              <input id="rnd-red-share" type="number" step="1" min="0" max="50"><span>%</span>
+              <label class="rnd-check"><input id="rnd-red-square" type="checkbox"> square only</label></div>
+          </fieldset>
+          <fieldset>
+            <legend>QR CODES</legend>
+            <div class="rnd-row"><label for="rnd-qr-n">How many</label><input id="rnd-qr-n" type="number" min="1" max="8"></div>
+            <div class="rnd-row"><label>Size (m)</label>
+              <input id="rnd-qr-s0" type="number" step="0.1" min="0.4" max="2"><span>to</span><input id="rnd-qr-s1" type="number" step="0.1" min="0.4" max="2"></div>
+            <div class="rnd-row"><label for="rnd-qr-gap">Min spacing (m)</label><input id="rnd-qr-gap" type="number" step="0.5" min="2" max="15"></div>
+            <div class="rnd-row"><label for="rnd-qr-clear">Min distance from red (m)</label><input id="rnd-qr-clear" type="number" step="0.5" min="1.5" max="10"></div>
+          </fieldset>
+          <fieldset>
+            <legend>DELIVERY TARGET</legend>
+            <div class="rnd-row">
+              <label class="rnd-check"><input type="radio" name="rnd-target" value="random"> random</label>
+              <label class="rnd-check"><input type="radio" name="rnd-target" value="specific"> choose</label>
+              <select id="rnd-target"></select></div>
+            <p class="rnd-hint">The start QR is rewritten to read DELIVERY-&lt;target&gt;.</p>
+          </fieldset>
+          <fieldset>
+            <legend>QR ORDER (NEAREST TO FARTHEST FROM THE START)</legend>
+            <div class="rnd-row">
+              <label class="rnd-check"><input type="radio" name="rnd-order" value="random"> random</label>
+              <label class="rnd-check"><input type="radio" name="rnd-order" value="specific"> choose</label></div>
+            <div class="rnd-row" id="rnd-order-slots"></div>
+          </fieldset>
+          <fieldset>
+            <legend>OTHER</legend>
+            <div class="rnd-row"><label class="rnd-check"><input id="rnd-obstacles" type="checkbox"> also move the obstacles in the orange return corridor</label></div>
+          </fieldset>
+        </form>
+        <div class="rnd-side">
+          <canvas id="rnd-canvas" width="460" height="360" aria-label="Preview of the generated delivery zone"></canvas>
+          <div id="rnd-stats" class="rnd-stats"></div>
+          <div id="rnd-current" class="rnd-hint"></div>
+        </div>
+      </div>
+      <div id="rnd-msg" class="rnd-msg" role="status"></div>
+      <div class="modal-foot">
+        <button class="btn" id="rnd-reset" type="button" title="Back to the original course">RESTORE ORIGINAL</button>
+        <span class="spacer"></span>
+        <button class="btn" id="rnd-random" type="button" title="New seed, then preview">RANDOMISE</button>
+        <button class="btn" id="rnd-preview" type="button" title="Show the layout these settings give, without touching the simulator">PREVIEW</button>
+        <button class="btn btn-primary" id="rnd-apply" type="button" title="Build this course and restart Gazebo + SITL">APPLY &amp; RESTART SIM</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/lidar.js"></script>
   <script src="/static/app.js"></script>
   <script src="/static/gazebo3d.js"></script>
 </body>

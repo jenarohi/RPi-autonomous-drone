@@ -12,7 +12,8 @@ import numpy as np
 from skyscan.bus import EventBus
 from skyscan.geo import gz_to_ned, gz_yaw_to_heading_deg
 from skyscan.gz.frames import FrameHub
-from skyscan.types import Frame, Truth
+from skyscan.lidar import LidarHub
+from skyscan.types import Frame, LidarScan, Truth
 from skyscan.utils.logger import get_logger
 
 log = get_logger("GZ/BRIDGE")
@@ -21,10 +22,12 @@ log = get_logger("GZ/BRIDGE")
 class GzBridge:
     """Subscribes to Gazebo transport topics and forwards to FrameHub and bus."""
 
-    def __init__(self, cfg: Any, bus: EventBus, hub: FrameHub) -> None:
+    def __init__(self, cfg: Any, bus: EventBus, hub: FrameHub, lidar: LidarHub | None = None) -> None:
         self.cfg = cfg
         self.bus = bus
         self.hub = hub
+        self.lidar = lidar
+        self._lidar_seq = 0
 
         sim_cfg = getattr(cfg, "sim", cfg)
         self.world_name = str(getattr(sim_cfg, "world_name", "aerothon_mission"))
@@ -53,6 +56,7 @@ class GzBridge:
         try:
             from gz.transport13 import Node
             from gz.msgs10.image_pb2 import Image
+            from gz.msgs10.laserscan_pb2 import LaserScan
             from gz.msgs10.pose_v_pb2 import Pose_V
             from gz.msgs10.world_stats_pb2 import WorldStatistics
         except ImportError as exc:
@@ -75,6 +79,14 @@ class GzBridge:
                 cb = self._make_cam_cb(cam_name)
                 ok = self._node.subscribe(Image, topic, cb)
                 log.info(f"Subscribed camera '{cam_name}' to topic '{topic}': ok={ok}")
+
+        # Subscribe the 2D lidar (the same sweep the real sensor driver would put into the LidarHub)
+        lidar_cfg = getattr(self.cfg, "lidar", None)
+        lidar_topic = str(getattr(lidar_cfg, "topic", "") or "").format(world=self.world_name, model=self.model_name)
+        if self.lidar is not None and lidar_topic:
+            self._lidar_yaw_deg = float(getattr(lidar_cfg, "yaw_offset_deg", 0.0))
+            ok_lidar = self._node.subscribe(LaserScan, lidar_topic, self._on_lidar)
+            log.info(f"Subscribed lidar to '{lidar_topic}': ok={ok_lidar}")
 
         # Subscribe model pose
         pose_topic = f"/world/{self.world_name}/dynamic_pose/info"
@@ -135,6 +147,23 @@ class GzBridge:
             except Exception as exc:
                 log.debug(f"Error decoding image frame for {cam_name}: {exc}")
         return cb
+
+    def _on_lidar(self, msg: Any) -> None:
+        if not self._running or self.lidar is None:
+            return
+        try:
+            self._lidar_seq += 1
+            self.lidar.put(LidarScan(
+                t=time.time(),
+                seq=self._lidar_seq,
+                angle_min_deg=math.degrees(float(msg.angle_min)) + getattr(self, "_lidar_yaw_deg", 0.0),
+                angle_step_deg=math.degrees(float(msg.angle_step)),
+                ranges=[float(r) for r in msg.ranges],
+                range_min=float(msg.range_min),
+                range_max=float(msg.range_max),
+            ))
+        except Exception as exc:  # noqa: BLE001 - a bad scan must never kill the transport thread
+            log.debug(f"Error decoding lidar scan: {exc}")
 
     def _on_pose(self, msg: Any) -> None:
         if not self._running:

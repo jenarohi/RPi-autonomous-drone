@@ -11,6 +11,10 @@ from skyscan.bus import EventBus
 from skyscan.mission.context import Aborted, MissionContext
 from skyscan.mission.stage import Stage
 from skyscan.mission.stage_a import StageA1, StageA2, StageA3, StageA4
+from skyscan.mission.stage_b import StageB1, StageB2, StageB3, StageB4
+from skyscan.mission.stage_c import StageC1, StageC2, StageC3, StageC4
+from skyscan.mission.stage_d import StageD1, StageD2, StageD3
+from skyscan.mission.stage_e import StageE1, StageE2, StageE3, StageE4, StageE5, StageE6
 from skyscan.types import Check, Sev, StageReport, StageState
 from skyscan.utils.logger import get_logger
 
@@ -28,6 +32,7 @@ class MissionRunner:
         vision: Any,
         recorder: Any = None,
         truth_fn: Callable[[], dict[str, Any] | None] | None = None,
+        lidar: Any = None,
     ) -> None:
         self.cfg = cfg
         self.bus = bus
@@ -35,8 +40,13 @@ class MissionRunner:
         self.vision = vision
         self.recorder = recorder
         self.truth_fn = truth_fn
+        self.lidar = lidar
 
-        self.stages: list[Stage] = [StageA1(), StageA2(), StageA3(), StageA4()]
+        self.stages: list[Stage] = [StageA1(), StageA2(), StageA3(), StageA4(),
+                                    StageB1(), StageB2(), StageB3(), StageB4(),
+                                    StageC1(), StageC2(), StageC3(), StageC4(),
+                                    StageD1(), StageD2(), StageD3(),
+                                    StageE1(), StageE2(), StageE3(), StageE4(), StageE5(), StageE6()]
         self._stage_map: dict[str, Stage] = {s.id: s for s in self.stages}
 
         self._mission_state: dict[str, Any] = {}
@@ -65,6 +75,8 @@ class MissionRunner:
                 raise RuntimeError("Cannot reset while mission runner is busy")
             log.info("Resetting mission runner state")
             self._mission_state.clear()
+            if hasattr(self.vision, "set_corridor_colour"):
+                self.vision.set_corridor_colour("green")
             self._reports = {
                 s.id: StageReport(stage_id=s.id, title=s.title, state=StageState.IDLE)
                 for s in self.stages
@@ -84,21 +96,22 @@ class MissionRunner:
 
     def describe(self) -> list[dict[str, Any]]:
         """Return stage descriptions for UI consumption."""
-        mcfg = getattr(self.cfg, "mission", self.cfg)
-        scfg = getattr(mcfg, "stage_a", mcfg)
         desc = []
         for s in self.stages:
-            stage_cfg = getattr(scfg, s.id.lower(), {})
-            desc.append(s.describe(stage_cfg))
+            desc.append(s.describe(self._stage_cfg(s)))
         return desc
 
-    def _make_ctx(self, stage: Stage) -> MissionContext:
+    def _stage_cfg(self, stage: Stage) -> Any:
+        """``mission.stage_<letter>.<id>`` (stage_a for A1..A4, stage_b for B1..B4, ..., stage_e for E1..E6)."""
         mcfg = getattr(self.cfg, "mission", self.cfg)
-        scfg = getattr(mcfg, "stage_a", mcfg)
+        group = getattr(mcfg, f"stage_{stage.id[:1].lower()}", mcfg)
+        return getattr(group, stage.id.lower(), {})
+
+    def _make_ctx(self, stage: Stage) -> MissionContext:
         return MissionContext(
             stage_id=stage.id,
             title=stage.title,
-            cfg=getattr(scfg, stage.id.lower(), {}),
+            cfg=self._stage_cfg(stage),
             full_cfg=self.cfg,
             bus=self.bus,
             link=self.link,
@@ -107,6 +120,7 @@ class MissionRunner:
             abort_event=self._abort_event,
             recorder=self.recorder,
             truth_fn=self.truth_fn,
+            lidar=self.lidar,
         )
 
     def preview(self) -> dict[str, list[Check]]:
@@ -350,8 +364,10 @@ class MissionRunner:
                 self._abort_event.set()
                 break
 
-            # 2. Mode changed away from GUIDED (manual takeover / RC switch)
-            if st.armed and st.mode not in ("GUIDED", "AUTO", "UNKNOWN"):
+            # 2. Mode changed away from GUIDED (manual takeover / RC switch). A stage that hands over to the flight
+            #    controller itself (E6: LAND for the touchdown) lists that mode in ``_allowed_modes`` while it does.
+            allowed = ("GUIDED", "AUTO", "UNKNOWN", *self._mission_state.get("_allowed_modes", ()))
+            if st.armed and st.mode not in allowed:
                 log.warn(f"Operator takeover detected! Mode changed to {st.mode}. Halting autonomous mission.")
                 self.bus.event("MISSION", f"Operator takeover: mode changed to {st.mode}", Sev.WARN)
                 # Abort without sending hold command (let the human fly!)

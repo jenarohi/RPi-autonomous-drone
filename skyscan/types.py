@@ -84,6 +84,10 @@ class VehicleState(_Dict):
     home_ned: tuple[float, float, float] | None = None  # HOME_POSITION x, y, z (local NED)
     gimbal_pitch_deg: float | None = None
     gimbal_yaw_deg: float | None = None
+    range_m: float | None = None        # downward rangefinder / lidar height above the ground (DISTANCE_SENSOR, RANGEFINDER)
+    range_t: float | None = None        # wall time of the last rangefinder reading
+    range_min_m: float | None = None    # the sensor's valid span
+    range_max_m: float | None = None
     last_text: str | None = None        # most recent STATUSTEXT
 
 
@@ -105,6 +109,33 @@ class Frame:
     @property
     def h(self) -> int:
         return int(self.img.shape[0])
+
+
+@dataclass
+class LidarScan(_Dict):
+    """One horizontal (2D) lidar sweep in the vehicle frame.
+
+    Angles are degrees from the nose, counter-clockwise (+ = to the LEFT), like ROS LaserScan. A reading of
+    ``inf`` (or NaN, or outside [range_min, range_max]) means "no return": nothing within range along that ray.
+    """
+    t: float                            # wall time received
+    seq: int
+    angle_min_deg: float                # angle of ranges[0]
+    angle_step_deg: float               # angle increment between consecutive ranges
+    ranges: list[float]                 # metres
+    range_min: float = 0.05
+    range_max: float = 12.0
+
+    def angle_deg(self, i: int) -> float:
+        return self.angle_min_deg + i * self.angle_step_deg
+
+    def to_wire(self, decimals: int = 2) -> dict[str, Any]:
+        """Compact JSON for the UI: no-return rays are ``None``."""
+        import math
+        lo, hi = self.range_min, self.range_max
+        r = [round(x, decimals) if (math.isfinite(x) and lo <= x <= hi) else None for x in self.ranges]
+        return {"seq": self.seq, "a0": round(self.angle_min_deg, 3), "da": round(self.angle_step_deg, 4),
+                "r": r, "rmin": lo, "rmax": hi}
 
 
 @dataclass
@@ -134,6 +165,7 @@ class QRDetection(_Dict):
     ground_fwd_m: float | None = None               # QR centre relative to the vehicle on the ground plane,
     ground_right_m: float | None = None             # in the heading-aligned level frame (fwd, right)
     latency_ms: float | None = None
+    others: list[dict[str, Any]] | None = None      # further symbols decoded in the same frame: {text, center, size_px}
 
 
 @dataclass
@@ -147,6 +179,28 @@ class QRStatus(_Dict):
     confirmed: str | None = None        # text that reached confirm_votes
     confirmed_t: float | None = None
     payload: QRPayload | None = None
+
+
+
+@dataclass
+class RedBlob(_Dict):
+    area_px: float
+    centroid: tuple[float, float]                   # [u, v] pixels
+    bbox: tuple[int, int, int, int]                 # x, y, w, h
+    hull: list[list[float]]                         # convex hull polygon, pixels
+    touches_border: bool = False                    # cut off by the image edge: the zone continues out of view
+
+
+@dataclass
+class RedDetection(_Dict):
+    """Red (restricted-zone) pixels in one belly-camera frame."""
+    t: float
+    cam: str
+    seq: int
+    found: bool                                     # at least one red region above the minimum area
+    mask_frac: float = 0.0                          # red pixels / all pixels
+    blobs: list[RedBlob] = field(default_factory=list)
+    latency_ms: float | None = None
 
 
 @dataclass

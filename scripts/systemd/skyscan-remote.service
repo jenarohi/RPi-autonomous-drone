@@ -1,0 +1,14 @@
+[Unit]
+Description=SkyScan Mission Control: server, simulator and Cloudflare tunnel (Axiom Dynamics)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/robotics/projects/drone/RPi-autonomous-drone/scripts/remote_boot.sh
+Restart=always
+RestartSec=15
+KillMode=control-group
+TimeoutStopSec=40
+
+[Install]
+WantedBy=default.target

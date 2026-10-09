@@ -27,7 +27,7 @@ from skyscan.types import Sev
 log = logging.getLogger(__name__)
 
 #: High-rate state kinds: per client only the newest message per (kind, key) is delivered.
-COALESCE = frozenset({"telem", "vision", "proc", "truth"})
+COALESCE = frozenset({"telem", "vision", "proc", "truth", "lidar", "nav", "search"})
 #: History kinds: not part of the latest-state cache.
 HISTORY = frozenset({"event", "log", "ack", "hello"})
 _RESERVED = ("t", "ts", "seq")

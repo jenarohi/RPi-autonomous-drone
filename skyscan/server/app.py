@@ -24,6 +24,7 @@ from skyscan import __version__
 from skyscan.bus import EventBus, Subscription, jsonable
 from skyscan.config import Cfg, repo_path
 from skyscan.gz.frames import FrameHub
+from skyscan.server import scenario_api
 from skyscan.types import Sev
 
 log = logging.getLogger(__name__)
@@ -44,9 +45,13 @@ class Services:
     vision: Any = None      # skyscan.vision.pipeline.VisionPipeline
     procman: Any = None     # skyscan.sim.procman.ProcessManager (sim profile only)
     gz: Any = None          # skyscan.gz.bridge.GzBridge (sim profile only)
+    lidar: Any = None       # skyscan.lidar.LidarHub (2D scan) → "lidar" messages
     recorder: Any = None
     course: dict | None = None                          # skyscan.sim.course.Course.to_dict()
     truth_fn: Callable[[], dict | None] | None = None   # sim ground-truth metrics → "truth" messages
+    truth_comp: Any = None                              # skyscan.sim.truth.TruthComputer: its course is swapped by a scenario
+    scenario: dict | None = None                        # the random scenario loaded now (skyscan/server/scenario_api.py)
+    scenario_base: Any = None                           # (canonical world file, canonical course file), set on first apply
     profile: str = "sim"
     started_at: float = field(default_factory=time.time)
 
@@ -282,6 +287,7 @@ def build_hello(svc: Services) -> dict:
             "telem_hz": cfg.get_path("server.telem_hz", 10),
         },
         "course": svc.course,
+        "scenario": (svc.scenario or {}).get("layout"),
         "stages": svc.runner.describe() if svc.runner is not None else [],
         "snapshot": svc.bus.snapshot(),
     })
@@ -532,6 +538,23 @@ def _publish_truth(svc: Services) -> None:
             svc.bus.publish("truth", t)
 
 
+def _publish_lidar(svc: Services) -> None:
+    """Latest 2D scan + wall geometry for the cockpit's lidar panel. Always publishes (``r`` is None when no data), so a
+    stalled sensor shows as NO DATA instead of a frozen picture."""
+    if svc.lidar is None:
+        return
+    from skyscan.lidar import nearest, wall_info
+    stats = svc.lidar.stats()
+    scan = svc.lidar.latest()
+    if scan is None or stats["age_s"] is None or stats["age_s"] > 2.0:
+        svc.bus.publish("lidar", {"r": None, "hz": 0.0, "age_s": stats["age_s"], "walls": None, "nearest_m": None})
+        return
+    walls = wall_info(scan)
+    near = nearest(scan)
+    svc.bus.publish("lidar", {**scan.to_wire(), "hz": stats["hz"], "age_s": stats["age_s"], "walls": walls.to_dict(),
+                              "nearest_m": round(near, 2) if near != float("inf") else None})
+
+
 def _make_precond_publisher(svc: Services) -> Callable[[], None]:
     """GO / NO-GO of each stage, published when it changes (and every few seconds so a new client is never stale).
     Evaluation only: nothing is ever started from here."""
@@ -596,6 +619,7 @@ def create_app(svc: Services) -> web.Application:
     app.router.add_get("/snapshot/{cam}.jpg", snapshot_handler)
     app.router.add_get("/api/state", state_handler)
     app.router.add_get("/api/health", health_handler)
+    scenario_api.register(app, lambda request: request.app[STATE].svc, _spawn)
     app.router.add_static("/static/", STATIC_DIR, follow_symlinks=False)
     app.router.add_static("/runs/", runs_dir, show_index=True)
     if svc.procman is not None:
@@ -613,6 +637,7 @@ def create_app(svc: Services) -> web.Application:
             asyncio.create_task(_every(cfg.get_path("server.proc_hz", 1), _make_proc_publisher(svc), "proc", state)),
             asyncio.create_task(_every(cfg.get_path("server.truth_hz", 5), lambda: _publish_truth(svc), "truth", state)),
             asyncio.create_task(_every(1.0, _make_precond_publisher(svc), "precond", state)),
+            asyncio.create_task(_every(cfg.get_path("server.lidar_hz", 5), lambda: _publish_lidar(svc), "lidar", state)),
         ]
 
     async def on_shutdown(app: web.Application) -> None:

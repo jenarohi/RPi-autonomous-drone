@@ -10,6 +10,7 @@ server:
   port: 8080
   telem_hz: 10                   # "telem" broadcast rate
   truth_hz: 5                    # "truth" (sim ground truth) broadcast rate
+  lidar_hz: 5                    # "lidar" (2D scan for the cockpit panel) broadcast rate
   proc_hz: 1                     # "proc" (process/sim status) broadcast rate
   mjpeg_quality: 70
   mjpeg_max_fps: 12
@@ -34,6 +35,8 @@ mavlink:
     HOME_POSITION: 1
     BATTERY_STATUS: 1
     GIMBAL_DEVICE_ATTITUDE_STATUS: 5
+    DISTANCE_SENSOR: 10          # downward lidar / rangefinder on the flight controller (height above ground)
+    RANGEFINDER: 10
 
 sim:
   world_name: aerothon_mission
@@ -77,6 +80,32 @@ cameras:                         # Gazebo camera topics (sim profile) and optics
     hfov_deg: 70.0
     mount: fixed
 
+lidar:                           # 2D scanning lidar (RPLidar A2M12 class): corridor walls + obstacles. Sim: Gazebo gpu_lidar on the drone
+  topic: /world/{world}/model/{model}/model/iris_with_standoffs/link/base_link/sensor/lidar_360/scan
+  yaw_offset_deg: 0.0            # sensor yaw relative to the nose (+ = CCW). 0 = scan angle 0 points forward
+  fresh_s: 1.0                   # a scan older than this is "no data" for the stages
+  min_hz: 2.0                    # stages refuse to run below this scan rate
+
+height:                          # which sensor says how high the vehicle is
+  source: auto                   # auto = downward rangefinder/lidar when it reports, else the EKF; rangefinder | ekf force one
+  rangefinder_max_age_s: 0.5     # a reading older than this is ignored
+
+winch:                           # payload winch (skyscan/payload.py): lowered on a rope to the ground, then released
+  backend: servo                 # servo = MAV_CMD_DO_SET_SERVO to the flight controller | mock = no hardware, timing only
+  servo_channel: 12              # SITL reserves ch12 for it (sim/params/skyscan_sitl.parm); there is no payload model in the sim world
+  pwm_stop: 1500
+  pwm_lower: 1100                # drum direction/speed that pays rope out
+  pwm_raise: 1900
+  rope_length_m: 5.5             # must exceed the 5 m delivery height + slack_m (the legacy mock used 5.0 and ignored the slack)
+  lower_mps: 0.5                 # rope speed at pwm_lower: calibrate on the real drum (no rope-length sensor: time x speed)
+  raise_mps: 0.5
+  slack_m: 0.2                   # rope paid out beyond the hover height so the payload lies slack on the ground
+  ground_settle_s: 1.0           # wait on the ground before releasing
+  release_channel: 0             # 0 = a spring hook lets go on ground contact (legacy); else a release servo on this channel
+  release_pwm: 1900
+  release_idle_pwm: 1100
+  release_hold_s: 1.5
+
 vision:
   max_fps: 10                    # detection rate cap per camera
   qr:
@@ -84,6 +113,19 @@ vision:
     confirm_votes: 3             # identical decodes needed to confirm the start QR
     vote_window_s: 15            # votes older than this are dropped
     upscale_below_px: 140        # retry decoding at 2x when the located symbol is smaller than this
+    tile_scan: true              # small codes (a 1 m code from 10 m is ~55 px): scan an empty frame in enlarged, overlapping tiles
+    tile_min_alt_m: 6.0          # ... only when the camera is at least this high (lower down the whole frame decodes)
+    tile_px: 240
+    tile_stride_px: 160          # tile overlap (80 px) is wider than the code
+    tile_scale: 3.0
+    tile_clahe: true             # local contrast equalisation of each enlarged tile (needed: ~1.7 px per module at 10 m)
+  red:                           # restricted (red) zones seen by the belly camera (skyscan/vision/redzone.py)
+    hsv_lo1: [0, 100, 100]       # red wraps the hue axis: two OpenCV HSV ranges (H 0..179), OR-ed
+    hsv_hi1: [8, 255, 255]
+    hsv_lo2: [172, 100, 100]
+    hsv_hi2: [180, 255, 255]
+    min_area_px: 600             # smaller red blobs are noise (a 3 x 3 m zone is ~27000 px from 10 m)
+    morph_px: 5                  # open/close kernel that removes speckle and fills pinholes
   banner:
     camera: front
     mode: floor                  # floor = the green corridor floor (the SkyScan world, legacy/create_world.py)
@@ -94,6 +136,8 @@ vision:
     min_area_px: 250
     hsv_lo: [40, 80, 30]         # OpenCV HSV (H 0..179) — floor green (0.1, 0.8, 0.1)
     hsv_hi: [85, 255, 255]
+    orange_hsv_lo: [9, 100, 80]  # the return corridor's floor (0.95, 0.55, 0.05): OpenCV hue ~17, clear of the red zones (< 8) and the green floor
+    orange_hsv_hi: [26, 255, 255]
     confirm_frames: 3            # consecutive plausible detections before A4 trusts one
     # --- banner mode ---
     size_m: [3.0, 1.0]           # physical banner width, height
@@ -152,9 +196,228 @@ mission:
       max_travel_m: 15           # refuse alignment targets further than this from the start
       timeout_s: 150
 
+  stage_b:
+    b1:
+      title: Descent to Corridor Altitude
+      corridor_alt_m: 3.0        # rulebook: corridor flight altitude 10 ft (~3 m)
+      alt_tol_m: 0.25
+      descent_mps: 0.5           # vertical speed limit while descending
+      hold_s: 2.0                # must stay inside the tolerance this long
+      max_drift_m: 0.6           # horizontal drift allowed while descending
+      timeout_s: 40
+    b2:
+      title: Corridor Entry
+      speed_mps: 0.5             # slow and centred while crossing the entrance
+      depth_m: 1.5               # fly this far past the entrance line (first point where both walls are seen)
+      max_search_m: 7.0          # give up if both walls are not seen within this distance of the start
+      confirm_scans: 3           # consecutive scans with both walls before the entrance counts
+      width_tol_m: 0.8           # measured inner width must be within this of the nominal 3.5 m
+      centre_tol_m: 0.5          # centre-line error allowed at the end
+      alt_tol_m: 0.4
+      timeout_s: 60
+    b3:
+      title: Autonomous Static Obstacle Traversal
+      speed_mps: 0.6
+      traverse_m: 6.0            # forward distance to cover before B4 takes over (B2 left ~1.5 m inside of 10 m)
+      min_clearance_m: 0.35      # closest any lidar return may come to the vehicle centre
+      centre_tol_m: 0.8          # lateral deviation from the centre line allowed (obstacles may push it)
+      alt_tol_m: 0.5
+      blocked_timeout_s: 12      # fail if the vehicle is stuck (no gap) this long
+      timeout_s: 120
+      avoid:                     # skyscan/mission/corridor_ctrl.AvoidParams
+        half_width_m: 0.55
+        lookahead_m: 3.5
+        stop_dist_m: 0.9
+        slow_dist_m: 2.2
+        max_lat_mps: 0.5
+    b4:
+      title: Corridor Exit Detection
+      speed_mps: 0.5
+      corridor_length_m: 10.0    # nominal (rulebook); used only to sanity-check the measured distance flown
+      length_tol_m: 3.5
+      exit_confirm_s: 1.0        # both walls gone for this long = out
+      clear_m: 1.0               # fly this far beyond the exit before holding
+      max_search_m: 8.0
+      alt_tol_m: 0.5
+      timeout_s: 60
+      avoid: {}
+
+  stage_c:                       # delivery zone: search, verify the target QR, deliver (rulebook Mission 2, p.35-37)
+    zone:                        # delivery-zone geo-fence in the course frame (fwd, right) metres. Rulebook: given in Phase 2
+      fwd: [22.0, 62.0]          # sim: the legacy world's 40 x 30 m delivery zone (gazebo x 19..59, y -15..15)
+      right: [-12.0, 18.0]
+    search_alt_m: 10.0           # rulebook: ascend to ~10 m to identify the correct QR code
+    deliver_alt_m: 5.0           # rulebook: descend to 5 m, lower the payload and release it
+    fence_inset_m: 1.0           # the vehicle keeps at least this far inside the zone edge
+    fence_slack_m: 2.5           # beyond the zone edge by more than this = fence breach, hold and fail
+    alt_tol_m: 0.5
+    nav:                         # shared flight settings of C1..C4
+      cruise_mps: 0.8
+      max_mps: 1.2
+      lookahead_m: 1.5
+      reach_m: 0.4
+      k_height: 0.8
+      vz_max_mps: 0.8
+    red:                         # red-zone avoidance
+      margin_m: 1.5              # keep-out distance around every red cell seen (edge to edge)
+      halt_m: 3.0                # red keep-out this close ahead on the planned path: halt and run the evasion protocol
+      reverse_m: 2.0             # back off this far along the entry vector
+      evade_mps: 1.0
+      offset_budget_s: 5.0       # the sideways offset that clears the boundary must finish within this
+      max_lateral_m: 6.0
+      max_evasions: 6            # per route; after that the planner just detours
+      grid_res_m: 0.5
+      confirm_hits: 2            # frames a cell must be seen red before it counts
+    c1:
+      title: Corridor Transition & Zone Entry
+      entry: [23.0, 0.0]         # (fwd, right) delivery-zone entry point, flown at the search altitude. Phase 2 coordinates
+      climb_mps: 0.8
+      entry_tol_m: 0.6
+      stable_s: 2.0
+      heading_tol_deg: 8.0
+      timeout_s: 90
+    c2:
+      title: Boustrophedon Search & Red-Zone Evasion
+      overlap: 0.30              # strip overlap
+      debug_frames_dir: null     # sim only: a folder to save the raw belly frame whenever the sim truth has a QR in view (+ what the scanner said)
+      strip_spacing_m: 5.4       # effective strip width; null = camera swath x (1 - overlap) (8.1 m for the 60 deg belly camera at 10 m)
+      min_frames: 3              # sightings before a located QR counts as a candidate
+      cluster_m: 1.5             # sightings closer than this are the same QR
+      confirm_decodes: 3         # identical decodes before a QR is read as that text
+      stop_on_match: true        # end the sweep as soon as the matching QR is read (the 15 min flight clock is scored)
+      coverage_min: 0.95         # a full sweep must cover this much of the zone
+      timeout_s: 480
+    c3:
+      title: Target QR Verification
+      verify_votes: 5            # matching decodes needed while hovering over the QR
+      verify_timeout_s: 8.0      # per altitude
+      inspect_alts_m: [8.5, 7.0, 6.0]   # lower in steps to read a code that is only located at 10 m, then climb back
+      centre_tol_m: 0.3
+      stable_s: 1.5
+      scatter_max_m: 0.4         # the position estimate of the QR must be this tight
+      max_candidates: 8          # candidates inspected before giving up (nearest first)
+      timeout_s: 240
+    c4:
+      title: Precision Descent & Payload Release
+      descent_mps: 0.5
+      alt_tol_m: 0.25
+      align_tol_m: 0.3           # over the QR before the descent starts
+      drop_tol_m: 0.5            # horizontal error allowed at release
+      pause_err_m: 1.0           # the descent pauses while the QR is further off than this
+      hold_s: 2.0                # stable at the delivery altitude before lowering
+      stable_xy_m: 0.6           # while lowering: the vehicle may wander this far from the QR
+      stable_z_m: 0.5
+      timeout_s: 180
+
+  stage_d:                       # return lap (rulebook Mission 2, p.36-37): clear the drop point, find the orange corridor, align on it
+    return_alt_m: 10.0           # rulebook: "ascend to 10-meter altitude" (the 10 m vs 10 ft wording of the corridor leg is a team decision for the next stage)
+    alt_tol_m: 0.5
+    nav_zone:                    # fence of the red-zone-aware flight back to the corridor (course frame): the delivery zone plus the way to the corridor
+      fwd: [8.0, 66.0]
+      right: [-16.0, 22.0]
+    d1:
+      title: Post-Delivery Ascent & Clearance
+      climb_mps: 0.8
+      clearance_m: 3.0           # at least this far above the drop point before any sideways move (we only climb straight up)
+      max_drift_m: 1.0           # sideways drift allowed during the climb
+      stable_s: 2.0
+      timeout_s: 60
+    d2:
+      title: Orange Corridor Localization
+      gimbal_pitch_deg: -30.0    # earth-stabilised; from 10 m the corridor floor is 20-45 deg below the horizon
+      prior: null                # (fwd, right) to look toward first; null = the take-off point (the corridors are beside the start)
+      search_headings_deg: [0, -15, 15, -30, 30, -45, 45, -70, 70]   # relative to the prior, tried when the corridor is not in view
+      search_dwell_s: 3.0
+      hop_m: 8.0                 # not in measurable range from here: move this far toward the prior and look again
+      max_hops: 3
+      axis_tol_deg: 30.0         # the corridor must run back toward the start within this of the reverse course heading
+      stable_s: 2.0
+    d3:
+      title: Approach & Alignment
+      gimbal_pitch_deg: -35.0
+      standoff_m: 10.0           # align this far before the entrance at 10 m altitude (45 deg down to the entrance line)
+      standoff_tol_m: 0.6
+      lateral_tol_m: 0.3
+      yaw_tol_deg: 5.0
+      stable_s: 2.0
+      max_refine_iters: 6
+      approach_timeout_s: 120
+      timeout_s: 240
+
+  stage_e:                       # return corridor + landing (rulebook Mission 2 p.36-37; scoring p.42 items 6, 7, 8)
+    e1:                          # the B-stage code flown back through the orange corridor (skyscan/mission/stage_e.py)
+      title: Descent to Return-Corridor Altitude
+      corridor_alt_m: 3.0        # rulebook: corridor height 10 ft; "ascend to 10 m" applies to the flight to the corridor (D)
+      alt_tol_m: 0.25
+      descent_mps: 0.6
+      hold_s: 2.0
+      max_drift_m: 0.6
+      timeout_s: 45
+    e2:
+      title: Return Corridor Entry
+      speed_mps: 0.5
+      depth_m: 1.5
+      max_search_m: 14.0         # D3 holds 10 m before the entrance
+      confirm_scans: 3
+      width_tol_m: 0.8
+      centre_tol_m: 1.0          # obstacle 3 sits on the centre line ~3 m past the return entrance: the lidar avoidance
+                                 # is already sliding round it (to ~0.85 m off centre) when E2 stops 1.5 m inside
+      alt_tol_m: 0.4
+      timeout_s: 75
+      avoid:
+        half_width_m: 0.55
+        lookahead_m: 3.5
+        stop_dist_m: 0.9
+        slow_dist_m: 2.2
+        max_lat_mps: 0.5
+    e3:
+      title: Return Obstacle Traversal
+      speed_mps: 0.5
+      traverse_m: 6.5            # E2 leaves ~1.5 m inside: this ends past the last obstacle, E4 flies the rest
+      min_clearance_m: 0.35
+      centre_tol_m: 1.3          # the obstacles leave 1.55-2.15 m gaps beside the walls: passing one means ~0.9 m off-centre
+      alt_tol_m: 0.5
+      blocked_timeout_s: 15
+      timeout_s: 150
+      avoid:
+        half_width_m: 0.55
+        lookahead_m: 3.5
+        stop_dist_m: 0.9
+        slow_dist_m: 2.2
+        max_lat_mps: 0.5
+    e4:
+      title: Return Corridor Exit
+      speed_mps: 0.5
+      corridor_length_m: 10.0
+      length_tol_m: 3.5
+      exit_confirm_s: 1.0
+      clear_m: 1.0
+      max_search_m: 8.0
+      alt_tol_m: 0.5
+      timeout_s: 60
+      avoid: {}
+    e5:
+      title: Return to the Take-off Point
+      approach_alt_m: 5.0        # above the 10 ft corridor walls; the start QR was read from this height (A3)
+      alt_tol_m: 0.4
+      qr_dwell_s: 4.0            # read the start QR this long to measure the position drift since take-off
+      min_qr_reads: 3
+      max_correction_m: 3.0      # a bigger "drift" is a misread: ignored
+      over_tol_m: 0.3
+      stable_s: 2.0
+      transit_timeout_s: 90
+    e6:
+      title: Precision Landing at the Take-off Point
+      descent_mps: 0.6
+      handover_alt_m: 1.0        # below this the flight controller's LAND mode finishes the touchdown and disarms
+      landing_tol_m: 1.0         # touchdown distance from the take-off point
+      descent_timeout_s: 30
+      land_timeout_s: 45
+      disarm_timeout_s: 15
+
 safety:
   max_alt_m: 12.0
-  geofence_radius_m: 60.0        # horizontal, from the course origin
+  geofence_radius_m: 80.0        # horizontal, from the course origin; backstop only, must clear the far corner of the delivery zone (~65 m)
   min_battery_pct: 25
   on_abort: hold                 # hold | land
 

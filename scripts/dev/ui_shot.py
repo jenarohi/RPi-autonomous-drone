@@ -44,7 +44,7 @@ def main() -> int:
         page.on("response", lambda r: errors.append(f"[http {r.status}] {r.url}") if r.status >= 400 else None)
         page.goto(args.url, wait_until="domcontentloaded")
         if args.theme:
-            page.evaluate("t => localStorage.setItem('skyscan_theme', t)", args.theme)
+            page.evaluate("t => localStorage.setItem('axiom_theme', t)", args.theme)
             page.reload(wait_until="domcontentloaded")
         time.sleep(2.0)
         for sel in args.click:

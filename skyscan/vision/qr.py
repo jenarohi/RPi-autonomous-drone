@@ -108,6 +108,17 @@ class QRScanner:
         self.confirm_votes = int(getattr(cfg, "confirm_votes", 3))
         self.vote_window_s = float(getattr(cfg, "vote_window_s", 15.0))
         self.upscale_below_px = float(getattr(cfg, "upscale_below_px", 140.0))
+        # a small code (a 1 m code from 10 m is ~55 px on a 640 px frame) is found by zbar only when it is cropped and enlarged:
+        # above ``tile_min_alt_m`` an empty frame is scanned in overlapping tiles, each enlarged ``tile_scale`` times
+        self.tile_scan = bool(getattr(cfg, "tile_scan", True))
+        self.tile_min_alt_m = float(getattr(cfg, "tile_min_alt_m", 6.0))
+        self.tile_px = int(getattr(cfg, "tile_px", 240))
+        self.tile_stride_px = int(getattr(cfg, "tile_stride_px", 160))
+        self.tile_scale = float(getattr(cfg, "tile_scale", 3.0))
+        # the codes are only ~1.7 px per module at 10 m: local contrast equalisation of each enlarged tile (measured on the
+        # sim's belly frames: 21 of 21 frames read, against 0 of 21 with a plain 2x tile)
+        self.tile_clahe = bool(getattr(cfg, "tile_clahe", True))
+        self._clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
 
         self.session_id = 0
         self.started_t: float | None = None
@@ -175,6 +186,54 @@ class QRScanner:
             payload=self.payload,
         )
 
+    def scan_tiles(self, gray: np.ndarray) -> list[dict[str, Any]]:
+        """Decode every QR code found by running zbar over overlapping, enlarged tiles of ``gray``.
+
+        The tiles overlap by more than a small code is wide, so each code lies whole inside at least one tile. Two passes,
+        the second only when the first finds nothing: ``tile_scale`` x with local contrast equalisation (what raw camera
+        frames need), then a plain 2x enlargement (what already-compressed video frames need: equalising amplifies their
+        blocking noise). Returns ``{text, corners, center, size_px}`` per distinct code in frame pixels."""
+        if zbar_decode is None:
+            return []
+        passes = [(self.tile_scale, self.tile_clahe)]
+        if self.tile_clahe or self.tile_scale != 2.0:
+            passes.append((2.0, False))
+        for scale, equalise in passes:
+            found = self._tile_pass(gray, scale, equalise)
+            if found:
+                return found
+        return []
+
+    def _tile_pass(self, gray: np.ndarray, k: float, equalise: bool) -> list[dict[str, Any]]:
+        h, w = gray.shape[:2]
+        t = max(32, min(self.tile_px, min(h, w)))
+        step = max(16, self.tile_stride_px)
+        xs = list(range(0, max(1, w - t + 1), step))
+        ys = list(range(0, max(1, h - t + 1), step))
+        if xs[-1] != max(0, w - t):
+            xs.append(max(0, w - t))
+        if ys[-1] != max(0, h - t):
+            ys.append(max(0, h - t))
+        found: list[dict[str, Any]] = []
+        for y0 in ys:
+            for x0 in xs:
+                big = cv2.resize(gray[y0:y0 + t, x0:x0 + t], (0, 0), fx=k, fy=k, interpolation=cv2.INTER_CUBIC)
+                if equalise:
+                    big = self._clahe.apply(big)
+                for sym in zbar_decode(big):
+                    pts = np.array([[p.x / k + x0, p.y / k + y0] for p in sym.polygon], dtype=np.float32)
+                    if len(pts) < 3:
+                        continue
+                    text = sym.data.decode("utf-8", errors="replace")
+                    centre = (float(pts[:, 0].mean()), float(pts[:, 1].mean()))
+                    size = float(max(np.ptp(pts[:, 0]), np.ptp(pts[:, 1])))
+                    if any(f["text"] == text and np.hypot(f["center"][0] - centre[0], f["center"][1] - centre[1]) < 0.7 * max(size, 8.0)
+                           for f in found):
+                        continue                              # the same code seen again by the next tile
+                    box = cv2.boxPoints(cv2.minAreaRect(pts)).tolist()
+                    found.append({"text": text, "corners": box, "center": [centre[0], centre[1]], "size_px": size})
+        return found
+
     def scan(
         self,
         frame: Frame,
@@ -197,11 +256,18 @@ class QRScanner:
         text: str | None = None
         corners: list[list[float]] | None = None
         decoder: str | None = None
+        others: list[dict[str, Any]] = []
 
         # Try pyzbar first
         if zbar_decode is not None:
             results = zbar_decode(gray)
             if results:
+                for extra in results[1:]:                    # further symbols in the same frame (several QRs in view)
+                    epts = np.array([[float(p.x), float(p.y)] for p in extra.polygon], dtype=np.float32)
+                    if len(epts) >= 3:
+                        others.append({"text": extra.data.decode("utf-8", errors="replace"),
+                                       "center": [float(epts[:, 0].mean()), float(epts[:, 1].mean())],
+                                       "size_px": float(max(np.ptp(epts[:, 0]), np.ptp(epts[:, 1])))})
                 res = results[0]
                 text = res.data.decode("utf-8", errors="replace")
                 pts = [[float(p.x), float(p.y)] for p in res.polygon]
@@ -226,6 +292,15 @@ class QRScanner:
                     decoder = "cv2-loc"
             except Exception as exc:
                 log.debug(f"cv2 QRCodeDetector error: {exc}")
+
+        # Nothing yet and the camera is high: look for small codes tile by tile
+        if (not text and self.tile_scan and zbar_decode is not None and rel_alt_m is not None
+                and rel_alt_m >= self.tile_min_alt_m):
+            hits = self.scan_tiles(gray)
+            if hits:
+                first = hits[0]
+                text, corners, decoder = first["text"], first["corners"], "zbar-tile"
+                others.extend({"text": h["text"], "center": h["center"], "size_px": h["size_px"]} for h in hits[1:])
 
         # Check if we should upscale and retry
         found = bool(text or corners)
@@ -292,4 +367,5 @@ class QRScanner:
             ground_fwd_m=round(ground_fwd_m, 2) if ground_fwd_m is not None else None,
             ground_right_m=round(ground_right_m, 2) if ground_right_m is not None else None,
             latency_ms=latency_ms,
+            others=others or None,
         )

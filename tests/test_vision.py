@@ -78,3 +78,36 @@ def test_banner_detector_synthetic():
     assert det.found, f"Banner not detected: {det.reason}"
     assert det.distance_m is not None and det.distance_m > 0
     assert det.plane_ok is True
+
+
+def _floor_with_qrs(codes: list[tuple[str, tuple[int, int]]], qr_px: int = 64) -> np.ndarray:
+    """A 640x480 floor with the sim's QR texture (quiet zone included) ``qr_px`` wide at each place, blurred once like a render."""
+    import cv2
+    img = np.full((480, 640, 3), (205, 200, 200), np.uint8)
+    for text, (x, y) in codes:
+        img[y:y + qr_px, x:x + qr_px] = qr_image(text, px=qr_px)
+    return cv2.GaussianBlur(img, (3, 3), 0.6)
+
+
+def test_small_qr_is_read_from_a_high_camera_by_tiling():
+    """A 1 m code from 10 m is about 60 px on a 640 px frame: zbar finds it only when the tile is cropped and enlarged."""
+    pytest.importorskip("pyzbar")
+    scanner = QRScanner(type("Cfg", (), {"confirm_votes": 2, "vote_window_s": 10.0, "upscale_below_px": 140.0}))
+    scanner.reset(1)
+    cam = CameraModel.from_hfov(640, 480, 60.0)
+    frame = Frame(cam="down", seq=1, t=1.0, img=_floor_with_qrs([("DELIVERY-D", (120, 380))]))
+    det = scanner.scan(frame, camera_model=cam, rel_alt_m=10.0)
+    assert det.found and det.text == "DELIVERY-D"
+    assert det.center is not None and abs(det.center[0] - (120 + 32)) < 12 and abs(det.center[1] - (380 + 32)) < 12
+    # nearer the ground the whole frame is scanned as before: tiling is not used
+    low = scanner.scan(Frame(cam="down", seq=2, t=1.5, img=frame.img), camera_model=cam, rel_alt_m=3.0)
+    assert low.decoder != "zbar-tile"
+
+
+def test_tiling_finds_two_codes_and_reports_both():
+    pytest.importorskip("pyzbar")
+    import cv2
+    scanner = QRScanner(type("Cfg", (), {"confirm_votes": 2, "vote_window_s": 10.0}))
+    img = _floor_with_qrs([("DELIVERY-A", (60, 60)), ("DELIVERY-B", (480, 340))])
+    found = scanner.scan_tiles(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
+    assert sorted(f["text"] for f in found) == ["DELIVERY-A", "DELIVERY-B"]

@@ -301,7 +301,7 @@ class MavLink:
             if self._master is None:
                 return
             if yaw_deg is not None:
-                mask = 0b0000000111000111  # vel + yaw
+                mask = 0b0000100111000111  # vel + yaw angle (yaw-rate ignored, so the heading really holds)
                 target_yaw_rad = math.radians(yaw_deg)
             else:
                 mask = 0b0000010111000111  # vel only
@@ -315,6 +315,11 @@ class MavLink:
                 0.0, 0.0, 0.0,
                 target_yaw_rad, 0.0
             )
+
+    def set_servo(self, channel: int, pwm_us: int, timeout: float = 2.0) -> bool:
+        """MAV_CMD_DO_SET_SERVO: drive a servo / AUX output (the payload winch). True when the flight controller ACKed it."""
+        res = self.command_long(mavutil.mavlink.MAV_CMD_DO_SET_SERVO, float(channel), float(pwm_us), timeout=timeout, retries=1)
+        return res == mavutil.mavlink.MAV_RESULT_ACCEPTED
 
     def hold(self, force_guided: bool = False) -> bool:
         """Hover in place at current position and yaw.
@@ -400,6 +405,8 @@ class MavLink:
             "BATTERY_STATUS": mavutil.mavlink.MAVLINK_MSG_ID_BATTERY_STATUS,
             "GIMBAL_DEVICE_ATTITUDE_STATUS": mavutil.mavlink.MAVLINK_MSG_ID_GIMBAL_DEVICE_ATTITUDE_STATUS,
             "MOUNT_STATUS": mavutil.mavlink.MAVLINK_MSG_ID_MOUNT_STATUS,
+            "DISTANCE_SENSOR": mavutil.mavlink.MAVLINK_MSG_ID_DISTANCE_SENSOR,
+            "RANGEFINDER": mavutil.mavlink.MAVLINK_MSG_ID_RANGEFINDER,
         }
 
         rates: dict[str, float] = dict(self._stream_rates_hz)
@@ -636,6 +643,20 @@ class MavLink:
             home_ned = (float(msg.x), float(msg.y), float(msg.z))
             with self._state_lock:
                 self._state = replace(self._state, t=now, home=home_latlon, home_ned=home_ned)
+
+        elif msg_type == "DISTANCE_SENSOR":
+            # Only the downward-facing sensor is the height reference (MAV_SENSOR_ROTATION_PITCH_270 = 25)
+            if int(getattr(msg, "orientation", 25)) == 25:
+                with self._state_lock:
+                    self._state = replace(
+                        self._state, t=now,
+                        range_m=float(msg.current_distance) / 100.0, range_t=now,
+                        range_min_m=float(msg.min_distance) / 100.0, range_max_m=float(msg.max_distance) / 100.0,
+                    )
+
+        elif msg_type == "RANGEFINDER":
+            with self._state_lock:
+                self._state = replace(self._state, t=now, range_m=float(msg.distance), range_t=now)
 
         elif msg_type == "MOUNT_STATUS":
             pitch = msg.pointing_a / 100.0

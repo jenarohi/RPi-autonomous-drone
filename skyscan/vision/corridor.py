@@ -1,4 +1,4 @@
-"""Green corridor detector (front camera): where is the corridor entrance relative to the vehicle?
+"""Green / orange corridor detector (front camera): where is the corridor entrance relative to the vehicle?
 
 In the SkyScan world the "green banner" the mission aligns on is the green corridor itself: a 3.5 m x 10 m green floor
 between two grey walls (legacy/create_world.py). Seen from 5 m up the floor is a small green trapezoid. Because the
@@ -11,6 +11,9 @@ pitch known), which turns the trapezoid back into the true rectangle and gives, 
     width_m      measured width (sanity check: must be ~3.5 m)
 
 The detection is returned as a ``BannerDetection`` with ``kind="floor"`` so the rest of the system (UI, A4) is unchanged.
+
+The return lap uses the same geometry on the orange corridor (legacy world: floor rgb 0.95 0.55 0.05): ``set_colour``
+swaps the colour range, nothing else changes.
 """
 from __future__ import annotations
 
@@ -41,13 +44,28 @@ class CorridorDetector:
 
     def __init__(self, cfg: Any) -> None:
         self.cfg = cfg
-        self.hsv_lo = np.array(getattr(cfg, "hsv_lo", [40, 80, 30]), dtype=np.uint8)
-        self.hsv_hi = np.array(getattr(cfg, "hsv_hi", [85, 255, 255]), dtype=np.uint8)
+        self.ranges = {
+            "green": (np.array(getattr(cfg, "hsv_lo", [40, 80, 30]), dtype=np.uint8),
+                      np.array(getattr(cfg, "hsv_hi", [85, 255, 255]), dtype=np.uint8)),
+            # OpenCV hue 9..26 is orange; the red zones (hue < 8 or > 172) and the green floor stay outside it
+            "orange": (np.array(getattr(cfg, "orange_hsv_lo", [9, 100, 80]), dtype=np.uint8),
+                       np.array(getattr(cfg, "orange_hsv_hi", [26, 255, 255]), dtype=np.uint8)),
+        }
+        self.colour = "green"
+        self.hsv_lo, self.hsv_hi = self.ranges["green"]
         self.width_m = float(getattr(cfg, "corridor_width_m", 3.5))
         self.width_tol_m = float(getattr(cfg, "width_tol_m", 0.6))
         self.min_area_px = int(getattr(cfg, "min_area_px", 250))
         self.edge_margin_px = int(getattr(cfg, "edge_margin_px", 3))
         self.max_ground_m = float(getattr(cfg, "max_ground_m", 60.0))
+
+    def set_colour(self, name: str) -> bool:
+        """Look for the ``green`` (forward lap) or ``orange`` (return lap) corridor. False for an unknown colour."""
+        if name not in self.ranges:
+            return False
+        self.colour = name
+        self.hsv_lo, self.hsv_hi = self.ranges[name]
+        return True
 
     # ── helpers ───────────────────────────────────────────────────────────────────────────────────────────────
     def _ground_points(self, pix: np.ndarray, cam: CameraModel, R: np.ndarray, height_m: float) -> np.ndarray:
@@ -64,6 +82,60 @@ class CorridorDetector:
         p_cam = R.T @ np.array([p_ground[0], p_ground[1], height_m])
         uv = cam.project(p_cam)
         return None if uv is None else [float(uv[0]), float(uv[1])]
+
+    def _edge_axis(self, cnt: np.ndarray, cam: CameraModel, R: np.ndarray, height_m: float, w: int, h: int,
+                   a0: np.ndarray) -> np.ndarray | None:
+        """Corridor axis from the straight edges of the floor outline, or None when they do not agree.
+
+        Seen from above, the walls (and the obstacles inside the corridor) hide part of the floor. Every edge of what
+        stays visible is then one of: parallel to the axis (wall bases, shadows of wall / obstacle tops), perpendicular
+        to it (entrance, obstacle shadow ends), or radial: the shadow of a vertical wall / obstacle edge, a ground line
+        through the camera's own ground point. Radial edges say nothing about the axis but they bend a long-edge fit
+        (19 deg on the return lap from a 3.6 m lateral offset), so drop them and take the dominant direction of the
+        rest modulo 90 deg (the strongest direction, so a stray edge cannot drag it); ``a0`` (the long-edge estimate)
+        picks which of the two directions is the axis.
+        """
+        poly = cv2.approxPolyDP(cnt, 1.5, True).reshape(-1, 2).astype(float) + 0.5
+        if len(poly) < 3:
+            return None
+        m = self.edge_margin_px
+        on_border = lambda p: p[0] <= m or p[0] >= w - m or p[1] <= m or p[1] >= h - m   # noqa: E731
+        phis, wgts = [], []                                      # edge direction modulo 90 deg, weight (m of edge)
+        for i in range(len(poly)):
+            p, q = poly[i], poly[(i + 1) % len(poly)]
+            if on_border(p) or on_border(q):                     # the image frame, not the corridor
+                continue
+            gp = ground_point(pixel_ray(cam, float(p[0]), float(p[1]), R), height_m)
+            gq = ground_point(pixel_ray(cam, float(q[0]), float(q[1]), R), height_m)
+            if gp is None or gq is None:
+                continue
+            d = np.array(gq, dtype=float) - np.array(gp, dtype=float)
+            mid = 0.5 * (np.array(gp, dtype=float) + np.array(gq, dtype=float))
+            length, rng = float(np.linalg.norm(d)), float(np.linalg.norm(mid))
+            if length < 0.4 or rng < 1e-6:
+                continue
+            off_radial = math.degrees(math.asin(min(1.0, abs(d[0] * mid[1] - d[1] * mid[0]) / (length * rng))))
+            wgt = length * min(1.0, max(0.0, (off_radial - 3.0) / 4.0))   # radial (< 3 deg) counts 0, > 7 deg fully
+            if wgt <= 0.0:
+                continue
+            phis.append(math.degrees(math.atan2(d[1], d[0])) % 90.0)
+            wgts.append(wgt)
+        if sum(wgts) < 1.5:
+            return None
+        phis_a, wgts_a = np.array(phis), np.array(wgts)
+        diff = lambda th: (phis_a - th + 45.0) % 90.0 - 45.0                  # noqa: E731  signed, modulo 90 deg
+        grid = np.arange(0.0, 90.0, 0.5)
+        score = [float(np.sum(wgts_a * np.exp(-0.5 * (diff(th) / 4.0) ** 2))) for th in grid]
+        peak = float(grid[int(np.argmax(score))])
+        near = np.abs(diff(peak)) <= 7.0
+        if wgts_a[near].sum() < 1.5:                             # too little straight edge agrees on one direction
+            return None
+        base = math.radians(peak + float(np.sum(wgts_a[near] * diff(peak)[near]) / wgts_a[near].sum()))
+        ang0 = math.atan2(a0[1], a0[0])
+        best = min((base + k * math.pi / 2.0 for k in range(-4, 5)),
+                   key=lambda x: abs(math.atan2(math.sin(x - ang0), math.cos(x - ang0))))
+        a = np.array([math.cos(best), math.sin(best)])
+        return -a if a[0] < 0 else a
 
     @staticmethod
     def _fail(frame: Frame, reason: str) -> BannerDetection:
@@ -85,11 +157,11 @@ class CorridorDetector:
         mask = cv2.morphologyEx(cv2.morphologyEx(mask, cv2.MORPH_OPEN, k), cv2.MORPH_CLOSE, k)
         cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
         if not cnts:
-            return self._fail(frame, "no green in view")
+            return self._fail(frame, f"no {self.colour} in view")
         cnt = max(cnts, key=cv2.contourArea)
         area = cv2.contourArea(cnt)
         if area < self.min_area_px:
-            return self._fail(frame, f"green blob too small ({area:.0f} px)")
+            return self._fail(frame, f"{self.colour} blob too small ({area:.0f} px)")
 
         pix = cnt.reshape(-1, 2).astype(float) + 0.5
         m = self.edge_margin_px
@@ -102,7 +174,7 @@ class CorridorDetector:
         R = cam_to_level("gimbal", gimbal_pitch_deg)
         P = self._ground_points(pix, camera_model, R, height_m)
         if len(P) < 12:
-            return self._fail(frame, "green region is above the horizon / not on the ground")
+            return self._fail(frame, f"{self.colour} region is above the horizon / not on the ground")
 
         # 1. initial axis from the min-area rectangle of the ground outline (long side)
         (cx, cy), (rw, rh), ang = cv2.minAreaRect(P.astype(np.float32))
@@ -126,17 +198,28 @@ class CorridorDetector:
             a_new = _line_dir(left) + _line_dir(right)
             a = a_new / (np.linalg.norm(a_new) + 1e-12)
 
+        # 3. walls hiding part of the floor bend the long-edge fit: when the outline's non-radial edges disagree with
+        #    it, trust them, and measure the width at the entrance edge (always in full view) instead of along the body
+        a_edges = self._edge_axis(cnt, camera_model, R, height_m, w, h, a)
+        occluded = a_edges is not None and math.degrees(math.acos(min(1.0, abs(float(a_edges @ a))))) > 2.0
+        if occluded:
+            a = a_edges
+
         n = np.array([-a[1], a[0]])
         t, s = P @ a, P @ n
         t_lo, t_hi = float(t.min()), float(t.max())
-        body = (t > t_lo + 0.3) & (t < t_hi - 0.3)
-        if body.sum() < 6:
-            body = np.ones_like(t, dtype=bool)
-        s_mid = float(np.median(s[body]))
-        s_left = float(np.median(s[body & (s < s_mid)])) if (body & (s < s_mid)).any() else float(s.min())
-        s_right = float(np.median(s[body & (s >= s_mid)])) if (body & (s >= s_mid)).any() else float(s.max())
-        # edge medians sit slightly inside the true edges only if the edge is noisy; use the extremes of the body
-        s_left, s_right = min(s_left, float(s[body].min())), max(s_right, float(s[body].max()))
+        if occluded:
+            band = t < t_lo + 0.35                              # the entrance edge, corner to corner
+            s_left, s_right = float(s[band].min()), float(s[band].max())
+        else:
+            body = (t > t_lo + 0.3) & (t < t_hi - 0.3)
+            if body.sum() < 6:
+                body = np.ones_like(t, dtype=bool)
+            s_mid = float(np.median(s[body]))
+            s_left = float(np.median(s[body & (s < s_mid)])) if (body & (s < s_mid)).any() else float(s.min())
+            s_right = float(np.median(s[body & (s >= s_mid)])) if (body & (s >= s_mid)).any() else float(s.max())
+            # edge medians sit slightly inside the true edges only if the edge is noisy; use the extremes of the body
+            s_left, s_right = min(s_left, float(s[body].min())), max(s_right, float(s[body].max()))
         width = s_right - s_left
         centre_s = 0.5 * (s_left + s_right)
 
@@ -159,7 +242,7 @@ class CorridorDetector:
         elif near_clipped:
             reason = "Detected, but the entrance edge is cut off by the image bottom (distance unreliable)"
         elif side_clipped:
-            reason = "Detected, but the green region touches the image side"
+            reason = f"Detected, but the {self.colour} region touches the image side"
 
         # corners for the overlay: far-left, far-right, near-right, near-left (image TL, TR, BR, BL)
         quad = []

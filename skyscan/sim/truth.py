@@ -48,30 +48,47 @@ class TruthComputer:
             "yaw_deg": round(course_yaw_err, 1),
         }
 
-        # Corridor metrics if forward corridor exists
-        fwd_corridor = self.course.corridors.get("forward")
-        if fwd_corridor and "entrance" in fwd_corridor:
-            ent = fwd_corridor["entrance"]
-            ent_fwd, ent_right = float(ent[0]), float(ent[1])
-            axis_yaw = float(fwd_corridor.get("axis_yaw_deg", 0.0))
+        # Delivery-zone truth: distance to every restricted (red) rectangle and the offset to every QR code, from the
+        # vehicle's ground point. Used only to check Stage C afterwards, never to fly it.
+        restricted, qrs = [], []
+        for o in self.course.objects:
+            if o.type == "restricted":
+                dx = max(abs(fwd - o.fwd) - o.size[0] / 2.0, 0.0)
+                dy = max(abs(right - o.right) - o.size[1] / 2.0, 0.0)
+                restricted.append({"id": o.id, "dist_m": round(math.hypot(dx, dy), 2), "inside": bool(dx == 0.0 and dy == 0.0)})
+            elif o.type == "qr":
+                dfwd, dright = o.fwd - fwd, o.right - right
+                qrs.append({"id": o.id, "content": o.extras.get("content"), "fwd": o.fwd, "right": o.right,
+                            "dfwd": round(dfwd, 2), "dright": round(dright, 2), "dist_m": round(math.hypot(dfwd, dright), 2)})
+        if restricted:
+            res["restricted"] = restricted
+        if qrs:
+            res["qrs"] = qrs
 
-            # Vector from entrance to vehicle in course frame
-            df = fwd - ent_fwd
-            dr = right - ent_right
-
-            # Rotate by axis_yaw to get along-axis and cross-axis components
-            rad = math.radians(axis_yaw)
-            ca, sa = math.cos(rad), math.sin(rad)
-            along_axis = df * ca + dr * sa
-            cross_axis = -df * sa + dr * ca
-
-            yaw_err = wrap180(course_yaw_err - axis_yaw)
-
-            res["corridor"] = {
-                "dist_to_entrance_m": round(math.sqrt(df * df + dr * dr), 2),
-                "along_axis_m": round(along_axis, 2),
-                "lateral_m": round(cross_axis, 2),  # + = right of axis
-                "yaw_err_deg": round(yaw_err, 1),
-            }
+        # Corridor metrics: the forward (green) and the return (orange) corridor, relative to the vehicle
+        for key, name in (("corridor", "forward"), ("return_corridor", "return")):
+            cor = self.course.corridors.get(name)
+            if cor and "entrance" in cor:
+                res[key] = self._corridor_truth(cor, fwd, right, course_yaw_err)
 
         return res
+
+    @staticmethod
+    def _corridor_truth(cor: dict[str, Any], fwd: float, right: float, course_yaw_err: float) -> dict[str, float]:
+        ent = cor["entrance"]
+        ent_fwd, ent_right = float(ent[0]), float(ent[1])
+        axis_yaw = float(cor.get("axis_yaw_deg", 0.0))
+
+        # Vector from entrance to vehicle in course frame
+        df = fwd - ent_fwd
+        dr = right - ent_right
+
+        # Rotate by axis_yaw to get along-axis and cross-axis components
+        rad = math.radians(axis_yaw)
+        ca, sa = math.cos(rad), math.sin(rad)
+        return {
+            "dist_to_entrance_m": round(math.sqrt(df * df + dr * dr), 2),
+            "along_axis_m": round(df * ca + dr * sa, 2),
+            "lateral_m": round(-df * sa + dr * ca, 2),  # + = right of axis
+            "yaw_err_deg": round(wrap180(course_yaw_err - axis_yaw), 1),
+        }

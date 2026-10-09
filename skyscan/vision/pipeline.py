@@ -8,6 +8,7 @@ from __future__ import annotations
 import collections
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any, Callable
 
 import cv2
@@ -16,13 +17,27 @@ import numpy as np
 from skyscan.bus import EventBus
 from skyscan.geo import CameraModel
 from skyscan.gz.frames import FrameHub
-from skyscan.types import BannerDetection, Frame, QRDetection, QRStatus, VehicleState
+from skyscan.types import BannerDetection, Frame, QRDetection, QRStatus, RedDetection, VehicleState
 from skyscan.utils.logger import get_logger
 from skyscan.vision.banner import BannerDetector
 from skyscan.vision.corridor import CorridorDetector
 from skyscan.vision.qr import QRScanner
+from skyscan.vision.redzone import RedZoneDetector
 
 log = get_logger("VISION/PIPELINE")
+
+
+@dataclass
+class DownObs:
+    """One belly-camera frame's detections together with the vehicle state when it was processed (Stage C turns the
+    pixels into ground positions with it)."""
+    seq: int
+    t: float
+    w: int
+    h: int
+    qr: QRDetection
+    red: RedDetection | None
+    state: VehicleState | None
 
 
 class VisionPipeline:
@@ -45,6 +60,7 @@ class VisionPipeline:
         self.min_period = 1.0 / max(1.0, self.max_fps)
 
         self.qr_scanner = QRScanner(getattr(vcfg, "qr", vcfg))
+        self.red_detector = RedZoneDetector(getattr(vcfg, "red", vcfg))
         bcfg = getattr(vcfg, "banner", vcfg)
         self.banner_mode = str(getattr(bcfg, "mode", "floor"))          # floor: green corridor floor | banner: vertical banner
         self.banner_detector = BannerDetector(bcfg)
@@ -57,6 +73,9 @@ class VisionPipeline:
 
         self._lock = threading.Lock()
         self._qr_latest: QRDetection | None = None
+        self._red_latest: RedDetection | None = None
+        self._down_hist: collections.deque[DownObs] = collections.deque(maxlen=200)
+        self._down_rx = 0.0                                  # wall time the last belly-camera frame was processed
         self._banner_latest: BannerDetection | None = None
         self._banner_history: collections.deque[BannerDetection] = collections.deque(maxlen=30)
 
@@ -122,6 +141,38 @@ class VisionPipeline:
         with self._lock:
             return self._qr_latest
 
+    def red_latest(self) -> RedDetection | None:
+        """Latest red-zone detection on the belly camera."""
+        with self._lock:
+            return self._red_latest
+
+    def down_age_s(self) -> float | None:
+        """Seconds since the last belly-camera frame was processed (None: none yet)."""
+        with self._lock:
+            return (time.time() - self._down_rx) if self._down_rx else None
+
+    def down_since(self, seq: int) -> list[DownObs]:
+        """Belly-camera observations newer than frame ``seq`` (oldest first), each with the vehicle state it was taken at."""
+        with self._lock:
+            return [o for o in self._down_hist if o.seq > seq]
+
+    @property
+    def corridor_colour(self) -> str:
+        return self.corridor_detector.colour
+
+    def set_corridor_colour(self, name: str) -> bool:
+        """Switch the front-camera corridor detector between the ``green`` and ``orange`` corridor. Old detections of the
+        other colour are dropped so a stage never confirms a corridor from them."""
+        with self._lock:
+            if name == self.corridor_detector.colour:
+                return True
+            if not self.corridor_detector.set_colour(name):
+                return False
+            self._banner_latest = None
+            self._banner_history.clear()
+        log.info(f"corridor detector now looks for the {name} corridor")
+        return True
+
     def banner_latest(self) -> BannerDetection | None:
         """Get latest banner detection."""
         with self._lock:
@@ -149,6 +200,14 @@ class VisionPipeline:
             if status and status.confirmed:
                 cv2.putText(out, f"CONFIRMED: {status.confirmed}", (10, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            with self._lock:
+                red = self._red_latest
+            if red and red.found:
+                for blob in red.blobs:
+                    pts = np.array(blob.hull, dtype=np.int32)
+                    cv2.polylines(out, [pts], True, (0, 0, 255), 3)
+                    cv2.putText(out, "RED ZONE", (int(blob.centroid[0]) - 40, int(blob.centroid[1])),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
         elif cam == "front":
             with self._lock:
@@ -164,7 +223,7 @@ class VisionPipeline:
                     near_mid = ((pts[2] + pts[3]) // 2).tolist()
                     far_mid = ((pts[0] + pts[1]) // 2).tolist()
                     cv2.line(out, tuple(near_mid), tuple(far_mid), (255, 255, 0), 1)
-                txt = f"CORRIDOR {det.distance_m}m  lat {det.lateral_m:+.2f}m  yaw {det.yaw_err_deg:+.1f}deg  w {det.width_m}m"
+                txt = f"{self.corridor_detector.colour.upper()} CORRIDOR {det.distance_m}m  lat {det.lateral_m:+.2f}m  yaw {det.yaw_err_deg:+.1f}deg  w {det.width_m}m"
                 cv2.putText(out, txt, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
                 if not det.plane_ok:
                     cv2.putText(out, det.reason or "REJECTED", (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
@@ -203,8 +262,16 @@ class VisionPipeline:
             cam_model = self.camera_model("down", frame.w, frame.h)
 
             det = self.qr_scanner.scan(frame, camera_model=cam_model, rel_alt_m=rel_alt)
+            try:
+                red = self.red_detector.detect(frame)
+            except Exception as exc:  # noqa: BLE001 - a vision glitch must not kill the QR path
+                log.warn(f"red-zone detection failed: {exc}")
+                red = None
             with self._lock:
                 self._qr_latest = det
+                self._red_latest = red
+                self._down_hist.append(DownObs(seq=frame.seq, t=frame.t, w=frame.w, h=frame.h, qr=det, red=red, state=st))
+                self._down_rx = time.time()
                 status = self.qr_scanner.status()
 
             # Publish vision telemetry message (coalesced by bus)
@@ -218,6 +285,7 @@ class VisionPipeline:
                 "fps": stats.get("fps", 0.0),
                 "qr": det,
                 "qr_status": status,
+                "red": red,
                 "banner": None,
             })
 

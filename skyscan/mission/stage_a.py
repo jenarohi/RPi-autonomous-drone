@@ -11,13 +11,50 @@ import math
 import time
 from typing import Any
 
-from skyscan.geo import ang_diff, CourseFrame, level_to_ned, wrap360
-from skyscan.mission.context import Aborted, MissionContext
+from skyscan.geo import ang_diff, CourseFrame, ground_offset_from_pixel, level_to_ned, wrap360
+from skyscan.mission.context import Aborted, MissionContext, height_above_ground
 from skyscan.mission.stage import Stage
 from skyscan.types import Check, Sev
 from skyscan.utils.logger import get_logger
 
 log = get_logger("STAGE/A")
+
+
+# ───────────────────────────── shared: ground QR positions ─────────────────────────────
+
+def qr_sightings(ctx: MissionContext, course: CourseFrame, since_t: float, text: str | None = None,
+                 min_height_m: float = 1.5) -> list[tuple[float, float]]:
+    """Course-frame ground positions of the QR codes the belly camera decoded since ``since_t`` (only ``text`` when
+    given), each projected with the vehicle state saved with its frame."""
+    vis = ctx.vision
+    if vis is None or not hasattr(vis, "down_since"):
+        return []
+    out: list[tuple[float, float]] = []
+    for obs in vis.down_since(0):
+        st = obs.state
+        if obs.t < since_t or st is None or st.ned is None or st.yaw_deg is None or obs.qr is None:
+            continue
+        h, _ = height_above_ground(st, ctx.full_cfg, now=obs.t)
+        if h is None or h < min_height_m:
+            continue
+        dets = [(obs.qr.center, obs.qr.text)] if (obs.qr.found and obs.qr.center) else []
+        dets += [(o.get("center"), o.get("text")) for o in (obs.qr.others or [])]
+        cam = vis.camera_model("down", obs.w, obs.h)
+        for center, txt in dets:
+            if center is None or not txt or (text is not None and txt != text):
+                continue
+            off = ground_offset_from_pixel(cam, center[0], center[1], h, "body_down", -90.0, st.roll_deg or 0.0, st.pitch_deg or 0.0)
+            if off is None:
+                continue
+            n, e, d = level_to_ned(st.ned, st.yaw_deg, off[0], off[1], 0.0)
+            f, r, _ = course.to_course(n, e, d)
+            out.append((f, r))
+    return out
+
+
+def median_pt(pts: list[tuple[float, float]]) -> tuple[float, float]:
+    fs, rs = sorted(p[0] for p in pts), sorted(p[1] for p in pts)
+    return fs[len(fs) // 2], rs[len(rs) // 2]
 
 
 # ───────────────────────────── A1: Takeoff ─────────────────────────────
@@ -99,6 +136,7 @@ class StageA1(Stage):
 
         # 5. Monitor climb
         t_takeoff = time.time()
+        ctx.mission["_t_takeoff"] = t_takeoff               # the rulebook's 15-minute mission clock (E6 reports it)
         reached = False
         while time.time() - t_takeoff < climb_timeout:
             ctx.check_abort()
@@ -334,6 +372,12 @@ class StageA3(Stage):
         ctx.output("qr", payload.to_dict() if payload else {})
         ctx.metric("qr_text", confirmed_status.confirmed)
         ctx.metric("qr_target", payload.target if payload else None)
+        # where the start QR lies, in the course frame: the landing (E5) finds it again to correct the EKF's drift
+        seen = qr_sightings(ctx, course, t_start, confirmed_status.confirmed)
+        if seen:
+            pos = median_pt(seen)
+            ctx.output("start_qr_pos", {"fwd": round(pos[0], 2), "right": round(pos[1], 2), "sightings": len(seen)})
+            ctx.metric("start_qr_course", {"fwd": round(pos[0], 2), "right": round(pos[1], 2)})
 
         ctx.snapshot("down", "start_qr_confirmed")
 
@@ -463,6 +507,8 @@ class StageA4(Stage):
             return False
         hold_d = course.to_ned(0.0, 0.0, hold_alt)[2]
         start_fwd, start_right, _ = course.to_course(*st.ned)
+        if hasattr(ctx.vision, "set_corridor_colour"):
+            ctx.vision.set_corridor_colour("green")             # the return lap (Stage D) switches the detector to orange
 
         # 1. point the front camera down the corridor and wait for it to get there
         ctx.phase(f"Pitching the front camera to {gimbal_pitch:.0f} deg")

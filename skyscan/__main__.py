@@ -20,6 +20,7 @@ from skyscan.bus import EventBus
 from skyscan.config import Cfg, load_config, repo_path
 from skyscan.fc.link import MavLink
 from skyscan.gz.bridge import GzBridge
+from skyscan.lidar import LidarHub
 from skyscan.gz.frames import FrameHub
 from skyscan.mission.runner import MissionRunner
 from skyscan.recorder import Recorder
@@ -69,6 +70,9 @@ def main() -> None:
     link = MavLink(cfg.mavlink, bus)
     link.start()
 
+    # 2D lidar (corridor walls, obstacles): filled by the Gazebo bridge in the sim profile, by the sensor driver on the vehicle
+    lidar = LidarHub()
+
     # Vision processing pipeline
     vision = VisionPipeline(cfg, bus, hub, state_fn=link.state)
     vision.start()
@@ -84,7 +88,7 @@ def main() -> None:
 
     if profile == "sim":
         procman = ProcessManager(cfg, bus)
-        gz = GzBridge(cfg, bus, hub)
+        gz = GzBridge(cfg, bus, hub, lidar=lidar)
         gz.start()
         truth_fn = lambda: truth_comp.compute(gz.truth())
 
@@ -95,6 +99,7 @@ def main() -> None:
         vision=vision,
         recorder=recorder,
         truth_fn=truth_fn,
+        lidar=lidar,
     )
 
     services = Services(
@@ -109,6 +114,8 @@ def main() -> None:
         recorder=recorder,
         course=course.to_dict() if course else None,
         truth_fn=truth_fn,
+        truth_comp=truth_comp,
+        lidar=lidar,
         profile=profile,
     )
 

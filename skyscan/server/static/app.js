@@ -1,6 +1,6 @@
 /**
- * SkyScan Mission Control Client
- * WebSocket protocol handler, real-time telemetry gauges, 2D course map, and camera overlays.
+ * Axiom Dynamics Mission Control System · browser client
+ * WebSocket protocol handler, stage cards, telemetry, 2D course map, camera overlays, lidar panel (lidar.js).
  */
 
 // Application state
@@ -36,61 +36,94 @@ window.addEventListener('DOMContentLoaded', () => {
   startRenderLoops();
 });
 
-function initTheme() {
-  const saved = localStorage.getItem('skyscan_theme') || 'light';
-  setTheme(saved);
+function lsGet(key) {
+  try { return localStorage.getItem(key); } catch (e) { return null; }
+}
 
-  // Wire segmented theme switcher buttons
-  document.querySelectorAll('.theme-seg-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const selected = btn.getAttribute('data-theme');
-      if (selected) {
-        setTheme(selected);
-      }
-    });
+function lsSet(key, value) {
+  try { localStorage.setItem(key, value); } catch (e) { /* storage blocked: the choice just is not remembered */ }
+}
+
+let themeColors = null;                  // canvas palette, read from the CSS tokens of the active theme
+
+function cv() {
+  if (!themeColors) {
+    const css = getComputedStyle(document.documentElement);
+    const v = (name, fallback) => css.getPropertyValue(name).trim() || fallback;
+    themeColors = {
+      grid: v('--cv-grid', '#243024'),
+      text: v('--cv-text', '#8fa38f'),
+      obj: v('--cv-obj', '#55655a'),
+      vehicle: v('--cv-vehicle', '#5cc4e4'),
+      light: document.documentElement.getAttribute('data-theme') === 'light',
+    };
+  }
+  return themeColors;
+}
+
+function initTheme() {
+  let saved = lsGet('axiom_theme');
+  if (saved !== 'light' && saved !== 'dark') saved = document.documentElement.getAttribute('data-theme') || 'dark';
+  setTheme(saved, false);
+  document.querySelectorAll('#theme-switch .seg-btn').forEach((btn) => {
+    btn.addEventListener('click', () => setTheme(btn.getAttribute('data-theme'), true));
   });
 }
 
-function setTheme(theme) {
-  document.body.classList.remove('theme-light', 'theme-pure-white', 'theme-dark');
-
-  if (theme === 'dark') {
-    document.body.classList.add('theme-dark');
-  } else if (theme === 'pure-white' || theme === 'white') {
-    document.body.classList.add('theme-pure-white');
-    theme = 'pure-white';
-  } else {
-    document.body.classList.add('theme-light');
-    theme = 'light';
-  }
-
-  // Update active state on segmented buttons
-  document.querySelectorAll('.theme-seg-btn').forEach((btn) => {
-    if (btn.getAttribute('data-theme') === theme) {
-      btn.classList.add('active');
-    } else {
-      btn.classList.remove('active');
-    }
+function setTheme(theme, persist = true) {
+  theme = theme === 'light' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', theme);
+  document.body.classList.remove('theme-light', 'theme-dark');
+  document.body.classList.add(`theme-${theme}`);
+  document.querySelectorAll('#theme-switch .seg-btn').forEach((btn) => {
+    const on = btn.getAttribute('data-theme') === theme;
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
   });
+  if (persist) lsSet('axiom_theme', theme);
+  themeColors = null;
+  document.dispatchEvent(new CustomEvent('axiom-theme', { detail: theme }));
+}
 
-  localStorage.setItem('skyscan_theme', theme);
+/** Set the caption (and optionally the icon) of a big toolbar button without touching its markup. */
+function setToolLabel(btn, text, icon) {
+  if (!btn) return;
+  const span = btn.querySelector('span');
+  if (span && span.textContent !== text) span.textContent = text;
+  if (icon) {
+    const use = btn.querySelector('use');
+    if (use) use.setAttribute('href', `#${icon}`);
+  }
 }
 
 // ───────────────────────────── Voice Announcements ─────────────────────────────
 
 class VoiceAnnouncer {
   constructor() {
-    this.enabled = localStorage.getItem('skyscan_voice') !== 'false';
+    this.enabled = lsGet('skyscan_voice') !== 'false';
     this.lastAnnouncement = '';
     this.lastAnnouncementTime = 0;
     this.clips = {};        // text -> mp3 url, pre-generated (scripts/dev/gen_voice.py)
     this.audio = null;
+    this.queue = [];        // callouts waiting their turn (one plays at a time)
+    this.playing = false;
+    this.gen = 0;           // bumped by stopAll() so stale audio callbacks are ignored
+    this.watchdog = null;
     fetch('/static/voice/manifest.json').then((r) => (r.ok ? r.json() : {}))
       .then((m) => { this.clips = m || {}; }).catch(() => {});
   }
 
   stopAll() {
-    if (this.audio) { try { this.audio.pause(); } catch (e) { /* already stopped */ } this.audio = null; }
+    this.gen += 1;                      // invalidates callbacks of whatever was playing
+    this.queue = [];
+    this.playing = false;
+    clearTimeout(this.watchdog);
+    if (this.audio) {
+      const a = this.audio;
+      this.audio = null;
+      a.onended = a.onerror = null;
+      try { a.pause(); } catch (e) { /* already stopped */ }
+    }
     if (window.speechSynthesis) window.speechSynthesis.cancel();
   }
 
@@ -105,24 +138,50 @@ class VoiceAnnouncer {
     this.lastAnnouncementTime = now;
 
     if (priority) this.stopAll();
+    if (this.queue.includes(text)) return;
+    if (this.queue.length >= 4) this.queue.shift();     // drop the stale backlog, keep the newest
+    this.queue.push(text);
+    if (!this.playing) this.next();
+  }
+
+  // Plays one callout at a time: the next one starts only when this one ended (or failed / timed out).
+  next() {
+    const text = this.queue.shift();
+    if (text === undefined) { this.playing = false; return; }
+    this.playing = true;
+    const gen = this.gen;
+    let finished = false;
+    const finish = () => {
+      if (finished || gen !== this.gen) return;         // already handled, or stopAll() ran meanwhile
+      finished = true;
+      clearTimeout(this.watchdog);
+      this.audio = null;
+      this.next();
+    };
+    this.watchdog = setTimeout(finish, 20000);
 
     const clip = this.clips[text];
     if (clip) {
+      let fellBack = false;
+      const fallback = () => { if (!fellBack) { fellBack = true; this.synth(text, finish); } };
       const a = new Audio(clip);
       this.audio = a;
-      a.play().catch(() => this.synth(text));     // autoplay blocked or file missing: fall back to speech
+      a.onended = finish;
+      a.onerror = fallback;                             // file missing or undecodable
+      a.play().catch(fallback);                         // autoplay blocked
       return;
     }
-    this.synth(text);
+    this.synth(text, finish);
   }
 
-  synth(text) {
-    if (!window.speechSynthesis) return;
+  synth(text, done = () => {}) {
+    if (!window.speechSynthesis) { done(); return; }
     try {
       const utter = new SpeechSynthesisUtterance(text);
       utter.rate = 1.05;
       utter.pitch = 1.0;
       utter.volume = 1.0;
+      utter.onend = utter.onerror = () => done();
 
       const voices = window.speechSynthesis.getVoices();
       if (voices && voices.length > 0) {
@@ -138,12 +197,13 @@ class VoiceAnnouncer {
       window.speechSynthesis.speak(utter);
     } catch (err) {
       console.warn('Speech synthesis error:', err);
+      done();
     }
   }
 
   toggle() {
     this.enabled = !this.enabled;
-    localStorage.setItem('skyscan_voice', this.enabled ? 'true' : 'false');
+    lsSet('skyscan_voice', this.enabled ? 'true' : 'false');
     if (!this.enabled) this.stopAll();
     return this.enabled;
   }
@@ -157,16 +217,23 @@ let previousSimState = null;
 function initVoice() {
   const btn = $('btn-voice-toggle');
   if (btn) {
-    btn.textContent = voice.enabled ? '🔊 Voice: ON' : '🔇 Voice: OFF';
+    const label = (on) => setToolLabel(btn, on ? 'VOICE: ON' : 'VOICE: OFF', on ? 'i-speaker' : 'i-mute');
+    label(voice.enabled);
     btn.addEventListener('click', () => {
       const enabled = voice.toggle();
-      btn.textContent = enabled ? '🔊 Voice: ON' : '🔇 Voice: OFF';
+      label(enabled);
       if (enabled) {
         voice.speak('Voice callouts enabled.');
       }
     });
   }
 }
+
+const VIEW_TITLES = {
+  'tab-map': 'FLIGHT DATA \u00b7 2D COURSE MAP',
+  'tab-cams': 'CAMERAS \u00b7 DETECTION FEEDS',
+  'tab-gzweb': 'GAZEBO 3D \u00b7 SIMULATION VIEW',
+};
 
 function initTabs() {
   document.querySelectorAll('.tab-btn').forEach((btn) => {
@@ -177,6 +244,8 @@ function initTabs() {
       const tabId = btn.getAttribute('data-tab');
       const el = $(tabId);
       if (el) el.classList.add('active');
+      const title = $('center-title');
+      if (title && VIEW_TITLES[tabId]) title.textContent = VIEW_TITLES[tabId];
       if (window.Gazebo3D) window.Gazebo3D.onTab(tabId === 'tab-gzweb');
     });
   });
@@ -334,8 +403,19 @@ function handleMessage(msg) {
   } else if (t === 'vision') {
     state.vision[msg.cam] = msg;
     updateVisionOverlay(msg);
+  } else if (t === 'course') {
+    // a random scenario was applied (or the original course restored): the map and the pop-up follow
+    state.course = msg.course;
+    state.scenario = msg.scenario || null;
+    drawCourseMap();
   } else if (t === 'proc') {
     updateProcStatus(msg);
+  } else if (t === 'lidar') {
+    if (window.LidarPanel) window.LidarPanel.onLidar(msg);
+  } else if (t === 'nav') {
+    if (window.LidarPanel) window.LidarPanel.onNav(msg);
+  } else if (t === 'search') {
+    onSearch(msg);
   } else if (t === 'truth') {
     state.truth = msg;
     if (msg.course) {
@@ -453,14 +533,32 @@ function clock(ts) {
   return new Date(ts * 1000).toTimeString().slice(0, 8);
 }
 
+const STAGE_GROUPS = {
+  A: 'STAGE A \u00b7 PRE-CORRIDOR OPERATIONS',
+  B: 'STAGE B \u00b7 GREEN CORRIDOR NAVIGATION',
+  C: 'STAGE C \u00b7 DELIVERY ZONE',
+  D: 'STAGE D \u00b7 RETURN LAP',
+  E: 'STAGE E \u00b7 RETURN CORRIDOR & LANDING',
+};
+
 function renderStageCards(stages) {
   const container = $('stage-list');
   container.innerHTML = '';
 
+  let lastGroup = null;
   stages.forEach((s) => {
+    const group = String(s.id || '?').charAt(0).toUpperCase();
+    if (group !== lastGroup) {
+      lastGroup = group;
+      const head = document.createElement('div');
+      head.className = 'stage-group';
+      head.textContent = STAGE_GROUPS[group] || `STAGE ${group}`;
+      container.appendChild(head);
+    }
     const card = document.createElement('div');
     card.className = 'stage-card';
     card.id = `stage-card-${s.id}`;
+    card.title = s.summary || '';
     card.innerHTML = `
       <div class="stage-top">
         <label class="stage-chk-label">
@@ -469,7 +567,6 @@ function renderStageCards(stages) {
         </label>
         <span class="stage-state-tag" id="tag-${s.id}">IDLE</span>
       </div>
-      <div class="stage-desc">${esc(s.summary || '')}</div>
       <div class="stage-phase" id="phase-${s.id}">Ready</div>
       <div class="stage-hint" id="hint-${s.id}" hidden></div>
       <div class="progress-bar-wrap">
@@ -479,7 +576,7 @@ function renderStageCards(stages) {
         <span class="go-pill" id="go-${s.id}">CHECKING…</span>
         <button class="btn btn-xs btn-primary stage-run" data-stage="${esc(s.id)}"
                 title="Run only ${esc(s.id)} now. Its preconditions are checked first; nothing starts on its own.">&#9654; RUN ${esc(s.id)}</button>
-        <button class="btn btn-xs btn-outline stage-more" data-stage="${esc(s.id)}" aria-expanded="false">DETAILS &#9662;</button>
+        <button class="btn btn-xs stage-more" data-stage="${esc(s.id)}" aria-expanded="false">DETAILS &#9662;</button>
       </div>
       <div class="stage-detail" id="detail-${s.id}" hidden></div>
     `;
@@ -565,6 +662,8 @@ function stageDetailHtml(sid) {
   const pre = stagePrecond[sid];
   const ran = rep && rep.state && rep.state !== 'idle' && rep.state !== 'queued';
   const out = [];
+  const meta = (state.stages || []).find((x) => x.id === sid);
+  if (meta && meta.summary) out.push(`<div class="stage-summary">${esc(meta.summary)}</div>`);
   const useReportChecks = ran && rep.checks && rep.checks.length;
   out.push(`<h4>Preconditions <em>${useReportChecks ? 'at start of run' : 'live'}</em></h4>` +
     `<ul class="chk-list">${checkRows(useReportChecks ? rep.checks : (pre && pre.checks))}</ul>`);
@@ -664,6 +763,40 @@ function updateStageReport(stageId, rep) {
         voice.speak('Scanning the start QR code.');
       } else if (stageId === 'A4') {
         voice.speak('Looking for the green corridor. Aligning with its axis.');
+      } else if (stageId === 'B1') {
+        voice.speak('Descending to corridor altitude.');
+      } else if (stageId === 'B2') {
+        voice.speak('Entering the corridor.');
+      } else if (stageId === 'B3') {
+        voice.speak('Navigating the corridor. Avoiding obstacles.');
+      } else if (stageId === 'B4') {
+        voice.speak('Detecting the corridor exit.');
+      } else if (stageId === 'C1') {
+        voice.speak('Entering the delivery zone. Climbing to 10 meters.');
+      } else if (stageId === 'C2') {
+        voice.speak('Searching the delivery zone. Watching for red zones.');
+      } else if (stageId === 'C3') {
+        voice.speak('Verifying the target QR code.');
+      } else if (stageId === 'C4') {
+        voice.speak('Descending over the target. Preparing payload delivery.');
+      } else if (stageId === 'D1') {
+        voice.speak('Payload released. Climbing to 10 meters.');
+      } else if (stageId === 'D2') {
+        voice.speak('Searching for the orange return corridor.');
+      } else if (stageId === 'D3') {
+        voice.speak('Approaching the return corridor. Avoiding red zones.');
+      } else if (stageId === 'E1') {
+        voice.speak('Descending to return corridor altitude.');
+      } else if (stageId === 'E2') {
+        voice.speak('Entering the return corridor.');
+      } else if (stageId === 'E3') {
+        voice.speak('Navigating the return corridor. Avoiding obstacles.');
+      } else if (stageId === 'E4') {
+        voice.speak('Detecting the return corridor exit.');
+      } else if (stageId === 'E5') {
+        voice.speak('Returning to the take-off point.');
+      } else if (stageId === 'E6') {
+        voice.speak('Landing at the take-off point.');
       }
     } else if (curState === 'success') {
       if (stageId === 'A1') {
@@ -674,6 +807,40 @@ function updateStageReport(stageId, rep) {
         voice.speak('Start QR code decoded successfully.');
       } else if (stageId === 'A4') {
         voice.speak('Green corridor aligned. Axis locked.');
+      } else if (stageId === 'B1') {
+        voice.speak('Corridor altitude established.');
+      } else if (stageId === 'B2') {
+        voice.speak('Inside the corridor.');
+      } else if (stageId === 'B3') {
+        voice.speak('Corridor traversal complete.');
+      } else if (stageId === 'B4') {
+        voice.speak('Corridor exit detected. Delivery zone ahead.');
+      } else if (stageId === 'C1') {
+        voice.speak('Inside the delivery zone at 10 meters.');
+      } else if (stageId === 'C2') {
+        voice.speak('Search complete. Target QR code located.');
+      } else if (stageId === 'C3') {
+        voice.speak('Target QR code verified.');
+      } else if (stageId === 'C4') {
+        voice.speak('Payload delivered and released.');
+      } else if (stageId === 'D1') {
+        voice.speak('Clear of the drop point at 10 meters.');
+      } else if (stageId === 'D2') {
+        voice.speak('Orange corridor located.');
+      } else if (stageId === 'D3') {
+        voice.speak('Aligned with the return corridor.');
+      } else if (stageId === 'E1') {
+        voice.speak('Return corridor altitude established.');
+      } else if (stageId === 'E2') {
+        voice.speak('Inside the return corridor.');
+      } else if (stageId === 'E3') {
+        voice.speak('Obstacles cleared.');
+      } else if (stageId === 'E4') {
+        voice.speak('Return corridor exit detected.');
+      } else if (stageId === 'E5') {
+        voice.speak('Holding over the take-off point.');
+      } else if (stageId === 'E6') {
+        voice.speak('Touchdown. Motors disarmed. Mission complete.');
       }
     } else if (curState === 'failed') {
       voice.speak(`Stage ${stageId} failed.`);
@@ -682,25 +849,52 @@ function updateStageReport(stageId, rep) {
 
   stageReports[stageId] = rep;
   if (card) refreshStage(stageId);
+  if (card && curState === 'running' && prevState !== 'running') {
+    card.scrollIntoView({ block: 'nearest' });       // keep the active stage visible in the scrolling list
+  }
 }
 
 function updateRunState(msg) {
+  if (msg.current) state.lastStage = msg.current;
   $('run-status-text').textContent = `${(msg.state || 'IDLE').toUpperCase()} ${msg.current ? '(' + msg.current + ')' : ''}`;
   const busy = msg.state === 'running';
   const changed = busy !== !!state.runBusy;
   state.runBusy = busy;
   const btn = $('btn-run-stages');
-  btn.textContent = busy ? '■ ABORT RUN' : '▶ RUN SELECTED';
-  btn.classList.toggle('btn-primary', !busy);
+  setToolLabel(btn, busy ? 'ABORT RUN' : 'RUN SELECTED', busy ? 'i-stop' : 'i-run');
   btn.classList.toggle('btn-danger', busy);
   if (changed) refreshAllStages();
 
-  if (msg.state === 'success' && state._lastRunState !== 'success') {
-    voice.speak('Stage A pre-corridor operations completed successfully.');
+  // the runner reports a clean finish as 'done' (older builds: 'success')
+  const finished = (st) => st === 'done' || st === 'success';
+  if (finished(msg.state) && !finished(state._lastRunState)) {
+    const ran = msg.stages || [];
+    if (ran.includes('E6')) {
+      voice.speak('Mission two complete. Landed at the take-off point.');
+    } else if (ran.includes('D3')) {
+      voice.speak('Stage D return approach completed successfully.');
+    } else if (ran.includes('C4')) {
+      voice.speak('Stage C delivery completed successfully.');
+    } else if (ran.includes('B4')) {
+      voice.speak('Stage B corridor navigation completed successfully.');
+    } else if (ran.includes('A4')) {
+      voice.speak('Stage A pre-corridor operations completed successfully.');
+    }
   } else if (msg.state === 'aborted' && state._lastRunState !== 'aborted') {
     voice.speak('Mission run aborted.');
   }
   state._lastRunState = msg.state;
+}
+
+// The furthest stage in mission order that has a report (a page opened after a run never saw it running).
+function latestReportedStage() {
+  let last = null;
+  document.querySelectorAll('[id^="stage-card-"]').forEach((card) => {
+    const sid = card.id.slice('stage-card-'.length);
+    const st = ((stageReports[sid] || {}).state || '').toLowerCase();
+    if (st && st !== 'idle' && st !== 'skipped') last = sid;
+  });
+  return last;
 }
 
 function updateMissionProducts(msg) {
@@ -722,6 +916,22 @@ function updateMissionProducts(msg) {
   } else {
     $('out-corridor').textContent = 'None';
   }
+  const m2 = (v) => (typeof v === 'number' ? v.toFixed(2) : '--');
+  const d = outputs.delivery;
+  $('out-delivery').textContent = d
+    ? (d.released ? `released · ${m2(d.drop_error_m)} m off` : 'not released') : 'None';
+  const ra = outputs.return_entry_aligned;
+  $('out-return').textContent = ra
+    ? `axis ${fmtVal(ra.axis_heading_deg)}° · ${m2(ra.standoff_m)} m out` : 'None';
+  const l = outputs.landing;
+  if (l) {
+    const t = l.mission_time_s;
+    const time = t === null || t === undefined ? '--' : `${Math.floor(t / 60)}:${String(Math.round(t % 60)).padStart(2, '0')}`;
+    $('out-landing').textContent = l.landed
+      ? `${m2(l.error_m)} m off · ${l.disarmed ? 'disarmed' : 'ARMED'} · ${time}` : 'not landed';
+  } else {
+    $('out-landing').textContent = 'None';
+  }
 }
 
 function updateProcStatus(msg) {
@@ -734,7 +944,7 @@ function updateProcStatus(msg) {
 
   $('badge-sim').textContent = `SIM: ${sim.toUpperCase()}`;
   $('badge-sim').className = 'badge ' + (sim === 'up' ? 'ok' : sim === 'error' ? 'error' : 'warn');
-  $('btn-sim-toggle').textContent = sim === 'up' ? 'Stop Sim' : 'Start Sim';
+  setToolLabel($('btn-sim-toggle'), sim === 'up' ? 'STOP SIM' : 'START SIM', sim === 'up' ? 'i-stop' : 'i-power');
 
   if (msg.cams) {
     const d = msg.cams.down;
@@ -748,48 +958,52 @@ function updateProcStatus(msg) {
   }
 }
 
+/** Size the overlay canvas to its box and return the mapping from image pixels to canvas pixels (the image is letterboxed). */
+function overlayGeometry(canvas, msg) {
+  const cw = canvas.clientWidth;
+  const ch = canvas.clientHeight;
+  if (!cw || !ch || !msg.w || !msg.h) return null;
+  if (canvas.width !== cw || canvas.height !== ch) {
+    canvas.width = cw;
+    canvas.height = ch;
+  }
+  const k = Math.min(cw / msg.w, ch / msg.h);
+  return { k, ox: (cw - msg.w * k) / 2, oy: (ch - msg.h * k) / 2 };
+}
+
 function updateVisionOverlay(msg) {
   const cam = msg.cam;
   const canvas = $(`overlay-${cam}`);
   if (!canvas) return;
+  const g = overlayGeometry(canvas, msg);
+  if (!g) return;
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  if (cam === 'down' && msg.qr && msg.qr.found && msg.qr.corners) {
-    ctx.strokeStyle = '#00ff88';
+  const trace = (corners, color, label) => {
+    ctx.strokeStyle = color;
     ctx.lineWidth = 3;
     ctx.beginPath();
-    msg.qr.corners.forEach((pt, i) => {
-      const x = (pt[0] / msg.w) * canvas.width;
-      const y = (pt[1] / msg.h) * canvas.height;
+    corners.forEach((pt, i) => {
+      const x = g.ox + pt[0] * g.k;
+      const y = g.oy + pt[1] * g.k;
       if (i === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
     });
     ctx.closePath();
     ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.font = '14px Consolas, Menlo, monospace';
+    ctx.fillText(label, g.ox + 10, g.oy + 24);
+  };
 
-    ctx.fillStyle = '#00ff88';
-    ctx.font = '14px monospace';
-    ctx.fillText(msg.qr.text || 'QR LOCATED', 10, 24);
+  if (cam === 'down' && msg.qr && msg.qr.found && msg.qr.corners) {
+    trace(msg.qr.corners, '#00ff88', msg.qr.text || 'QR LOCATED');
   }
 
   if (cam === 'front' && msg.banner && msg.banner.found && msg.banner.corners) {
     const b = msg.banner;
-    ctx.strokeStyle = b.plane_ok ? '#00ff88' : '#f59e0b';
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    b.corners.forEach((pt, i) => {
-      const x = (pt[0] / msg.w) * canvas.width;
-      const y = (pt[1] / msg.h) * canvas.height;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    });
-    ctx.closePath();
-    ctx.stroke();
-
-    ctx.fillStyle = b.plane_ok ? '#00ff88' : '#f59e0b';
-    ctx.font = '14px monospace';
-    ctx.fillText(`BANNER: ${b.distance_m}m | YAW ERR: ${b.yaw_err_deg}°`, 10, 24);
+    trace(b.corners, b.plane_ok ? '#00ff88' : '#f59e0b', `BANNER: ${b.distance_m}m | YAW ERR: ${b.yaw_err_deg}°`);
   }
 }
 
@@ -851,6 +1065,131 @@ function startRenderLoops() {
   requestAnimationFrame(loop);
 }
 
+// ───────────────────────────── Stage C: delivery-zone search ─────────────────────────────
+
+function onSearch(msg) {
+  const prev = state.search;
+  state.search = msg;
+  // the evasion protocol ran (a new red zone ahead): say so once per evasion
+  if (prev && prev.stage === msg.stage && (msg.evasions || 0) > (prev.evasions || 0)) {
+    voice.speak('Red zone ahead. Halting, reversing and moving clear.', true);
+  }
+  if (!prev || prev.stage !== msg.stage) {
+    state._searchTarget = null;
+  }
+  if (msg.target && !state._searchTarget) {
+    state._searchTarget = msg.target;
+    voice.speak('Target QR code located.');
+  }
+}
+
+// The latest search picture, if the vehicle is at (or on its way into) the delivery zone; null shows the normal course map.
+function searchView(vFwd) {
+  const S = state.search;
+  if (!S || !S.zone || !S.zone.fwd || !S.zone.right) return null;
+  if (vFwd === null || vFwd === undefined) return null;
+  return vFwd >= S.zone.fwd[0] - 8 ? S : null;
+}
+
+function drawSearchOverlay(ctx, S, toScreen, scale, pal) {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = (f0, f1, r0, r1) => {
+    const [x0, y0] = toScreen(f0, r0);
+    const [x1, y1] = toScreen(f1, r1);
+    return [x0, y0, x1 - x0, y1 - y0];
+  };
+  ctx.save();
+
+  // the zone fence and the sweep strips
+  ctx.lineWidth = 1.5 * dpr;
+  ctx.strokeStyle = '#38bdf8';
+  ctx.setLineDash([8 * dpr, 5 * dpr]);
+  ctx.strokeRect(...rect(S.zone.fwd[0], S.zone.fwd[1], S.zone.right[0], S.zone.right[1]));
+  ctx.setLineDash([]);
+  ctx.strokeStyle = 'rgba(56, 189, 248, 0.35)';
+  ctx.lineWidth = 1 * dpr;
+  (S.strips || []).forEach((st) => {
+    const [x0, y0] = toScreen(st.f0, st.right);
+    const [x1, y1] = toScreen(st.f1, st.right);
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(x1, y1);
+    ctx.stroke();
+  });
+
+  // red zones the camera has mapped, with the keep-out margin round them
+  const m = S.margin_m || 0;
+  (S.red || []).forEach((b) => {
+    ctx.fillStyle = 'rgba(239, 68, 68, 0.38)';
+    ctx.fillRect(...rect(b[0], b[1], b[2], b[3]));
+    ctx.strokeStyle = '#ef4444';
+    ctx.lineWidth = 1.5 * dpr;
+    ctx.strokeRect(...rect(b[0], b[1], b[2], b[3]));
+    ctx.setLineDash([4 * dpr, 4 * dpr]);
+    ctx.strokeStyle = 'rgba(239, 68, 68, 0.75)';
+    ctx.strokeRect(...rect(b[0] - m, b[1] + m, b[2] - m, b[3] + m));
+    ctx.setLineDash([]);
+  });
+
+  // the route still to fly
+  const route = S.route || [];
+  if (route.length > 1) {
+    ctx.strokeStyle = '#f59e0b';
+    ctx.lineWidth = 2 * dpr;
+    ctx.beginPath();
+    route.forEach((p, i) => {
+      const [x, y] = toScreen(p[0], p[1]);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+
+  // the QR codes seen: green = the target, amber = another code, grey = not read yet
+  const colour = { match: '#22c55e', decoy: '#f59e0b', unknown: '#94a3b8' };
+  ctx.font = `${11 * dpr}px monospace`;
+  (S.qrs || []).forEach((q) => {
+    const [x, y] = toScreen(q.fwd, q.right);
+    const c = colour[q.status] || colour.unknown;
+    ctx.strokeStyle = c;
+    ctx.fillStyle = c;
+    ctx.lineWidth = 2 * dpr;
+    const r = Math.max(0.6 * scale, 6 * dpr);
+    ctx.strokeRect(x - r, y - r, 2 * r, 2 * r);
+    ctx.fillText(q.text || '?', x + r + 3 * dpr, y + 4 * dpr);
+  });
+
+  // the delivery point
+  if (S.target) {
+    const [x, y] = toScreen(S.target[0], S.target[1]);
+    const r = 12 * dpr;
+    ctx.strokeStyle = '#22c55e';
+    ctx.lineWidth = 2 * dpr;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.moveTo(x - r - 5 * dpr, y);
+    ctx.lineTo(x + r + 5 * dpr, y);
+    ctx.moveTo(x, y - r - 5 * dpr);
+    ctx.lineTo(x, y + r + 5 * dpr);
+    ctx.stroke();
+  }
+
+  // status line
+  ctx.fillStyle = pal.text;
+  ctx.font = `bold ${12 * dpr}px monospace`;
+  const alt = S.alt_m === null || S.alt_m === undefined ? '--' : S.alt_m.toFixed(1);
+  // the search figures belong to the stage that published them: once a later stage runs, say which stage it is
+  // and show the live altitude instead of leaving the last search line on screen
+  const last = state.lastStage || latestReportedStage();
+  const later = last && last !== S.stage;
+  const line = later
+    ? `${last} · alt ${((state.telem || {}).rel_alt_m || 0).toFixed(1)} m · search: coverage ` +
+      `${Math.round((S.coverage || 0) * 100)} % · red zones ${(S.red || []).length} · evasions ${S.evasions || 0}`
+    : `${S.stage || 'C'} · ${S.mode || ''} · alt ${alt} m · coverage ${Math.round((S.coverage || 0) * 100)} % · ` +
+      `red zones ${(S.red || []).length} · evasions ${S.evasions || 0}`;
+  ctx.fillText(line, 10 * dpr, ctx.canvas.height - 10 * dpr);
+  ctx.restore();
+}
+
 function drawCourseMap() {
   const canvas = $('course-canvas');
   if (!canvas) return;
@@ -860,28 +1199,47 @@ function drawCourseMap() {
 
   ctx.clearRect(0, 0, w, h);
 
+  // Vehicle position in the course frame (truth when the simulator provides it)
+  const ned = state.telem && state.telem.ned;
+  const vFwd = state.truth?.course ? state.truth.course.fwd : (ned ? ned[1] : null); // east ≈ +x
+  const vRight = state.truth?.course ? state.truth.course.right : (ned ? ned[0] : null);
+
   // Coordinate transform: map center (takeoff point at 15% width, 50% height)
-  const scale = (w / 45.0); // 45 meters view width
-  const ox = w * 0.12;
-  const oy = h * 0.5;
+  let scale = (w / 45.0); // 45 meters view width
+  let ox = w * 0.12;
+  let oy = h * 0.5;
+
+  // Stage C: once the vehicle is at the delivery zone, fit the view to the zone and draw the search on it
+  const S = searchView(vFwd);
+  if (S) {
+    const pad = 3;
+    const f0 = S.zone.fwd[0] - pad - 4;
+    const f1 = S.zone.fwd[1] + pad;
+    const r0 = S.zone.right[0] - pad;
+    const r1 = S.zone.right[1] + pad;
+    scale = Math.min(w / (f1 - f0), (h - 28 * window.devicePixelRatio) / (r1 - r0));
+    ox = w / 2 - ((f0 + f1) / 2) * scale;
+    oy = h / 2 - 12 * window.devicePixelRatio - ((r0 + r1) / 2) * scale;     // room for the status line at the bottom
+  }
 
   function toScreen(fwd, right) {
     return [ox + fwd * scale, oy + right * scale];
   }
 
-  const isLight = document.body.classList.contains('theme-light');
+  const pal = cv();
+  const isLight = pal.light;
 
-  // Draw Grid
-  ctx.strokeStyle = isLight ? '#e2e8f0' : '#182438';
+  // Draw Grid (every 5 m over whatever the view shows)
+  ctx.strokeStyle = pal.grid;
   ctx.lineWidth = 1;
-  for (let f = -5; f <= 40; f += 5) {
+  for (let f = Math.ceil(-ox / scale / 5) * 5; f <= (w - ox) / scale; f += 5) {
     const [x, _] = toScreen(f, 0);
     ctx.beginPath();
     ctx.moveTo(x, 0);
     ctx.lineTo(x, h);
     ctx.stroke();
   }
-  for (let r = -15; r <= 15; r += 5) {
+  for (let r = Math.ceil(-oy / scale / 5) * 5; r <= (h - oy) / scale; r += 5) {
     const [_, y] = toScreen(0, r);
     ctx.beginPath();
     ctx.moveTo(0, y);
@@ -896,10 +1254,10 @@ function drawCourseMap() {
       const sw = obj.size[0] * scale;
       const sh = obj.size[1] * scale;
 
-      ctx.fillStyle = obj.color || (isLight ? '#94a3b8' : '#445577');
+      ctx.fillStyle = obj.color || pal.obj;
       if (obj.type === 'pad') {
         ctx.fillRect(sx - sw / 2, sy - sh / 2, sw, sh);
-        ctx.strokeStyle = isLight ? '#475569' : '#ffffff';
+        ctx.strokeStyle = pal.text;
         ctx.strokeRect(sx - sw / 2, sy - sh / 2, sw, sh);
       } else if (obj.type === 'qr') {
         ctx.fillRect(sx - sw / 2, sy - sh / 2, sw, sh);
@@ -920,12 +1278,12 @@ function drawCourseMap() {
     });
   }
 
+  if (S) drawSearchOverlay(ctx, S, toScreen, scale, pal);
+
   // Draw Vehicle Position & Trail
   if (state.telem && state.telem.ned) {
-    const ned = state.telem.ned;
-    // If course frame exists, relative to course origin
-    const fwd = state.truth?.course ? state.truth.course.fwd : ned[1]; // east ≈ +x
-    const right = state.truth?.course ? state.truth.course.right : ned[0];
+    const fwd = vFwd;
+    const right = vRight;
 
     const [vx, vy] = toScreen(fwd, right);
 
@@ -936,7 +1294,7 @@ function drawCourseMap() {
     const ax = vx + Math.sin(headingRad) * arrowLen;
     const ay = vy - Math.cos(headingRad) * arrowLen;
 
-    const droneColor = isLight ? '#0284c7' : '#00d2ff';
+    const droneColor = pal.vehicle;
     ctx.strokeStyle = droneColor;
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -1000,3 +1358,248 @@ function drawArtificialHorizon() {
   ctx.lineTo(w / 2, h / 2 + 5);
   ctx.stroke();
 }
+
+
+// ───────────────────────────── RANDOM scenario pop-up ─────────────────────────────
+// Talks to /api/scenario/*: preview a layout, apply it (rebuilds the Gazebo world and restarts the simulator), or restore
+// the original course. The layout itself is made on the server (skyscan/sim/scenario.py); this only collects the settings
+// and draws what comes back.
+window.rnd = (() => {
+  const LETTERS = 'ABCDEFGH'.split('');
+  const KEY = 'axiom_random_settings';
+  const q = (id) => document.getElementById(id);
+  const DEFAULTS = {
+    red_n: [2, 4], red_w: [2, 5], red_d: [2, 5], red_share: 20, red_square: false,
+    qr_n: 5, qr_s: [1, 1], qr_gap: 4, qr_clear: 2.5,
+    target_mode: 'random', target: 'C', order_mode: 'random', order: ['A', 'B', 'C', 'D', 'E'], obstacles: false,
+  };
+  let cfg = { ...DEFAULTS };
+  let layout = null;           // what the canvas shows
+  let info = null;             // GET /api/scenario
+  let busy = false;
+
+  function load() {
+    try { Object.assign(cfg, JSON.parse(localStorage.getItem(KEY) || '{}')); } catch (_) { /* defaults */ }
+  }
+  function save() {
+    try { localStorage.setItem(KEY, JSON.stringify(cfg)); } catch (_) { /* private mode */ }
+  }
+
+  const num = (id) => parseFloat(q(id).value);
+  function readForm() {
+    const n = Math.max(1, Math.min(8, Math.round(num('rnd-qr-n') || 5)));
+    cfg = {
+      red_n: [Math.round(num('rnd-red-n0')), Math.round(num('rnd-red-n1'))],
+      red_w: [num('rnd-red-w0'), num('rnd-red-w1')], red_d: [num('rnd-red-d0'), num('rnd-red-d1')],
+      red_share: num('rnd-red-share'), red_square: q('rnd-red-square').checked,
+      qr_n: n, qr_s: [num('rnd-qr-s0'), num('rnd-qr-s1')], qr_gap: num('rnd-qr-gap'), qr_clear: num('rnd-qr-clear'),
+      target_mode: document.querySelector('input[name="rnd-target"]:checked').value, target: q('rnd-target').value,
+      order_mode: document.querySelector('input[name="rnd-order"]:checked').value,
+      order: [...q('rnd-order-slots').querySelectorAll('select')].map((x) => x.value),
+      obstacles: q('rnd-obstacles').checked,
+    };
+    save();
+    return cfg;
+  }
+  function params() {
+    const c = readForm();
+    const seed = q('rnd-seed').value.trim();
+    return {
+      seed: seed === '' ? null : Number(seed),
+      red_count: c.red_n, red_w: c.red_w, red_d: c.red_d, red_square: c.red_square, max_red_fraction: c.red_share / 100,
+      qr_count: c.qr_n, qr_size: c.qr_s, qr_spacing_m: c.qr_gap, qr_clear_m: c.qr_clear,
+      target_mode: c.target_mode, target: c.target_mode === 'specific' ? c.target : null,
+      order_mode: c.order_mode, order: c.order_mode === 'specific' ? c.order : [], obstacles: c.obstacles,
+    };
+  }
+
+  function slots() {
+    const n = Math.max(1, Math.min(8, Math.round(num('rnd-qr-n') || cfg.qr_n)));
+    const box = q('rnd-order-slots');
+    const want = (cfg.order && cfg.order.length === n && new Set(cfg.order).size === n) ? cfg.order : LETTERS.slice(0, n);
+    box.innerHTML = '';
+    want.forEach((L, i) => {
+      const sel = document.createElement('select');
+      sel.title = `QR number ${i + 1} counting from the start`;
+      LETTERS.slice(0, n).forEach((x) => sel.add(new Option(x, x, false, x === L)));
+      sel.addEventListener('change', () => { fixOrder(sel); toggles(); readForm(); });
+      box.appendChild(sel);
+    });
+    const t = q('rnd-target');
+    const keep = cfg.target;
+    t.innerHTML = '';
+    LETTERS.slice(0, n).forEach((x) => t.add(new Option(x, x, false, x === keep)));
+    toggles();
+  }
+  function fixOrder(changed) {            // keep the order a permutation: swap with the slot that had the chosen letter
+    const sels = [...q('rnd-order-slots').querySelectorAll('select')];
+    const dup = sels.find((x) => x !== changed && x.value === changed.value);
+    if (dup) dup.value = changed.dataset.prev || LETTERS.find((L) => !sels.some((x) => x.value === L)) || dup.value;
+  }
+  function toggles() {
+    const specificOrder = document.querySelector('input[name="rnd-order"]:checked').value === 'specific';
+    q('rnd-order-slots').querySelectorAll('select').forEach((x) => { x.disabled = !specificOrder; x.dataset.prev = x.value; });
+    q('rnd-target').disabled = document.querySelector('input[name="rnd-target"]:checked').value !== 'specific';
+  }
+
+  function fill() {
+    const c = cfg;
+    q('rnd-red-n0').value = c.red_n[0]; q('rnd-red-n1').value = c.red_n[1];
+    q('rnd-red-w0').value = c.red_w[0]; q('rnd-red-w1').value = c.red_w[1];
+    q('rnd-red-d0').value = c.red_d[0]; q('rnd-red-d1').value = c.red_d[1];
+    q('rnd-red-share').value = c.red_share; q('rnd-red-square').checked = !!c.red_square;
+    q('rnd-qr-n').value = c.qr_n; q('rnd-qr-s0').value = c.qr_s[0]; q('rnd-qr-s1').value = c.qr_s[1];
+    q('rnd-qr-gap').value = c.qr_gap; q('rnd-qr-clear').value = c.qr_clear;
+    document.querySelector(`input[name="rnd-target"][value="${c.target_mode}"]`).checked = true;
+    document.querySelector(`input[name="rnd-order"][value="${c.order_mode}"]`).checked = true;
+    q('rnd-obstacles').checked = !!c.obstacles;
+    slots();
+  }
+
+  function say(text, kind) {
+    const m = q('rnd-msg');
+    m.textContent = text || '';
+    m.className = 'rnd-msg' + (kind ? ' ' + kind : '');
+  }
+  function setBusy(b) {
+    busy = b;
+    ['rnd-preview', 'rnd-random', 'rnd-dice', 'rnd-apply', 'rnd-reset'].forEach((id) => { q(id).disabled = b; });
+    gate();
+  }
+  function gate() {                    // applying restarts the simulator: not while a run is going, not without a simulator
+    const run = !!state.runBusy;
+    const off = !info || !info.available;
+    q('rnd-apply').disabled = busy || run || off;
+    q('rnd-reset').disabled = busy || run || off;
+    if (off && info) say('Scenarios need the simulator profile: this server is connected to a real vehicle.', 'err');
+    else if (run) say('A mission run is in progress: abort it before applying a scenario (applying restarts the simulator).', 'err');
+  }
+
+  async function call(path, body) {
+    const r = await fetch(path, { method: body === undefined ? 'GET' : 'POST', credentials: 'same-origin',
+      headers: body === undefined ? {} : { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
+    let j = {};
+    try { j = await r.json(); } catch (_) { /* not JSON */ }
+    if (!r.ok || j.ok === false) throw new Error(j.error || `${r.status} ${r.statusText}`);
+    return j;
+  }
+
+  // drawing: course forward = to the right, course right = down (as seen from above, flying toward the right)
+  function draw(l) {
+    const cv = q('rnd-canvas');
+    const g = cv.getContext('2d');
+    const css = getComputedStyle(document.documentElement);
+    const v = (n, d) => css.getPropertyValue(n).trim() || d;
+    g.clearRect(0, 0, cv.width, cv.height);
+    g.fillStyle = v('--bg-canvas', '#0c0f0c'); g.fillRect(0, 0, cv.width, cv.height);
+    const z = (l && l.zone) || (info && info.zone) || { fwd: [22, 62], right: [-12, 18] };
+    const pad = 22;
+    const sx = (cv.width - 2 * pad) / (z.fwd[1] - z.fwd[0]);
+    const sy = (cv.height - 2 * pad) / (z.right[1] - z.right[0]);
+    const s = Math.min(sx, sy);
+    const ox = pad + ((cv.width - 2 * pad) - s * (z.fwd[1] - z.fwd[0])) / 2;
+    const oy = pad + ((cv.height - 2 * pad) - s * (z.right[1] - z.right[0])) / 2;
+    const X = (f) => ox + (f - z.fwd[0]) * s;
+    const Y = (r) => oy + (r - z.right[0]) * s;
+    g.fillStyle = 'rgba(160,170,150,0.14)'; g.fillRect(X(z.fwd[0]), Y(z.right[0]), s * (z.fwd[1] - z.fwd[0]), s * (z.right[1] - z.right[0]));
+    g.strokeStyle = v('--border-strong', '#6c796c'); g.lineWidth = 1.5; g.setLineDash([6, 4]);
+    g.strokeRect(X(z.fwd[0]), Y(z.right[0]), s * (z.fwd[1] - z.fwd[0]), s * (z.right[1] - z.right[0])); g.setLineDash([]);
+    g.fillStyle = v('--text-dim', '#7a847a'); g.font = '11px sans-serif'; g.textAlign = 'left';
+    g.fillText('◄ start side', X(z.fwd[0]) + 4, Y(z.right[0]) - 6);
+    g.textAlign = 'right'; g.fillText('far side ►', X(z.fwd[1]) - 4, Y(z.right[0]) - 6);
+    if (!l) { g.textAlign = 'center'; g.fillStyle = v('--text-muted', '#a0a99a'); g.font = '13px sans-serif';
+      g.fillText('Press PREVIEW or RANDOMISE', cv.width / 2, cv.height / 2); return; }
+    (l.reds || []).forEach((r) => {
+      g.fillStyle = 'rgba(224,82,63,0.55)'; g.strokeStyle = '#e0523f'; g.lineWidth = 1.5;
+      g.fillRect(X(r.fwd - r.w / 2), Y(r.right - r.d / 2), r.w * s, r.d * s); g.strokeRect(X(r.fwd - r.w / 2), Y(r.right - r.d / 2), r.w * s, r.d * s);
+      g.fillStyle = '#fff'; g.font = '10px sans-serif'; g.textAlign = 'center'; g.fillText(`${r.w}×${r.d}`, X(r.fwd), Y(r.right) + 3);
+    });
+    (l.qrs || []).forEach((p) => {
+      const half = Math.max(5, p.size * s / 2 + 2);
+      const hit = p.letter === l.target;
+      g.fillStyle = hit ? '#86c93f' : '#e8ecdf'; g.fillRect(X(p.fwd) - half, Y(p.right) - half, 2 * half, 2 * half);
+      g.strokeStyle = hit ? '#e3a82a' : '#222'; g.lineWidth = hit ? 3 : 1; g.strokeRect(X(p.fwd) - half, Y(p.right) - half, 2 * half, 2 * half);
+      g.fillStyle = '#111'; g.font = 'bold 12px sans-serif'; g.textAlign = 'center'; g.fillText(p.letter, X(p.fwd), Y(p.right) + 4);
+    });
+  }
+  function stats(l) {
+    const el = q('rnd-stats');
+    if (!l) { el.textContent = ''; return; }
+    const st = l.stats || {};
+    const order = (l.qrs || []).map((p) => p.letter).join(' ');
+    el.innerHTML = '';
+    const rows = [
+      `Seed ${l.seed}   ·   ${st.red_zones} red zone(s), ${Math.round((st.red_share || 0) * 100)} % of the zone`,
+      `Delivery target: ${l.target}   (start QR reads ${l.start_text})`,
+      `QR order, nearest to farthest: ${order}`,
+    ].concat(l.notes || []);
+    rows.forEach((t) => { const d = document.createElement('div'); d.textContent = t; el.appendChild(d); });
+  }
+  function show(l) { layout = l; draw(l); stats(l); }
+
+  async function doPreview(newSeed) {
+    setBusy(true); say('Working…');
+    try {
+      if (newSeed) q('rnd-seed').value = '';
+      const j = await call('/api/scenario/preview', { params: params() });
+      q('rnd-seed').value = j.layout.seed;           // what is shown can be reproduced exactly by APPLY
+      show(j.layout); say('Preview only: nothing has changed in the simulator yet.');
+    } catch (e) { say(e.message, 'err'); }
+    setBusy(false);
+  }
+  async function doApply() {
+    if (!q('rnd-seed').value.trim() || !layout) { await doPreview(false); if (!layout) return; }
+    if (!confirm('Apply this scenario?\n\nThe simulator (Gazebo + SITL) restarts with the new course. A flight in progress is lost.')) return;
+    setBusy(true); say('Building the world…');
+    try {
+      const j = await call('/api/scenario/apply', { params: params() });
+      show(j.layout); say(j.message + ' It is ready when the process panel shows the simulator up.', 'ok');
+      if (window.voice) voice.speak('New random scenario applied. Restarting the simulator.');
+      refresh();
+    } catch (e) { say(e.message, 'err'); }
+    setBusy(false);
+  }
+  async function doReset() {
+    if (!confirm('Restore the original course?\n\nThe simulator restarts. A flight in progress is lost.')) return;
+    setBusy(true); say('Restoring…');
+    try { const j = await call('/api/scenario/reset', {}); say(j.message, 'ok'); show(null); refresh(); }
+    catch (e) { say(e.message, 'err'); }
+    setBusy(false);
+  }
+  async function refresh() {
+    try {
+      info = await call('/api/scenario');
+      q('rnd-current').textContent = info.active
+        ? `Loaded now: a random scenario (seed ${info.scenario.seed}, target ${info.scenario.target}).` : 'Loaded now: the original course.';
+      if (info.active && !layout) show(info.scenario);
+    } catch (e) { info = null; say(e.message, 'err'); }
+    gate();
+  }
+
+  function open() {
+    load(); fill(); q('rnd-modal').hidden = false;
+    show(state.scenario || null); say(''); refresh(); q('rnd-close').focus();
+  }
+  function close() { q('rnd-modal').hidden = true; }
+
+  function init() {
+    q('btn-random').addEventListener('click', open);
+    q('rnd-close').addEventListener('click', close);
+    q('rnd-modal').addEventListener('mousedown', (e) => { if (e.target === q('rnd-modal')) close(); });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !q('rnd-modal').hidden) close(); });
+    q('rnd-preview').addEventListener('click', () => doPreview(false));
+    q('rnd-random').addEventListener('click', () => doPreview(true));
+    q('rnd-dice').addEventListener('click', () => doPreview(true));
+    q('rnd-apply').addEventListener('click', doApply);
+    q('rnd-reset').addEventListener('click', doReset);
+    // rebuild the order slots while the count is typed, not on blur: a rebuild on blur can wrap the slots onto a
+    // new row and move PREVIEW between mousedown and mouseup, which loses the click
+    const qrCount = () => { if (q('rnd-order-slots').children.length !== readForm().qr_n) slots(); };
+    q('rnd-qr-n').addEventListener('input', qrCount);
+    q('rnd-qr-n').addEventListener('change', qrCount);
+    document.querySelectorAll('input[name="rnd-target"], input[name="rnd-order"]').forEach((x) => x.addEventListener('change', toggles));
+    document.addEventListener('axiom-theme', () => { if (!q('rnd-modal').hidden) draw(layout); });
+  }
+  init();
+  return { onCourse: () => { if (!q('rnd-modal').hidden) refresh(); } };
+})();
