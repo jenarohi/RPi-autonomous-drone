@@ -85,12 +85,16 @@ def field(centre=(39.0, 0.0), yaw_deg=0.0):
     return p
 
 
-def course(green_entry=(6.0, 3.0), green_yaw=0.0, dz=((39.0, 0.0), 0.0)):
+def course(green_entry=(6.0, 3.0), green_yaw=0.0, dz=((39.0, 0.0), 0.0), orange=((16.0, -3.0), 180.0)):
     p = corridor("green", green_entry, green_yaw, GREEN)
-    p += corridor("orange", (16.0, -3.0), 180.0, (0.95, 0.55, 0.05))
-    p += [box("obs1", 9, -2.0, 2.5, 0.4, 1.0, 5.0, (0.4, 0.4, 0.4)),
-          box("obs2", 11, -4.0, 2.5, 0.4, 1.0, 5.0, (0.4, 0.4, 0.4)),
-          box("obs3", 13, -2.5, 2.5, 0.4, 1.2, 5.0, (0.4, 0.4, 0.4))]
+    (ex, ey), oyaw = orange
+    p += corridor("orange", (ex, ey), oyaw, (0.95, 0.55, 0.05))
+    th = math.radians(oyaw)
+    t, n = (math.cos(th), math.sin(th)), (-math.sin(th), math.cos(th))
+    # obstacles inside the orange corridor: (distance from the entrance, lateral offset to the left, size y)
+    for i, (sd, lat, sy) in enumerate(((3.0, -1.0, 1.0), (5.0, 1.0, 1.0), (7.0, -0.5, 1.2)), 1):
+        p.append(box(f"obs{i}", ex + sd * t[0] + lat * n[0], ey + sd * t[1] + lat * n[1], 2.5,
+                     0.4, sy, 5.0, (0.4, 0.4, 0.4), th))
     return p + field(*dz)
 
 
@@ -147,6 +151,14 @@ DELIVERY = {
     "dz_far": ((58.0, 8.0), -15.0, "e", [paper("paper1", 27.0, 2.0)]),
 }
 
+# Return-corridor worlds: the orange corridor is NOT where the old code assumed
+# (16, -3): the drone has to find it. name: (field centre, field yaw, target, orange (entry, yaw))
+RETURN = {
+    "ret_south": (((39.0, 0.0), 0.0), "c", ((24.0, -14.0), 185.0)),
+    "ret_north": (((45.0, -4.0), 30.0), "f", ((12.0, 15.0), 190.0)),
+    "ret_near": (((39.0, 0.0), 0.0), "c", ((30.0, -2.0), 175.0)),
+}
+
 
 if __name__ == "__main__":
     for name, (drone, dyaw, qxy, gyaw, extra) in SCENARIOS.items():
@@ -161,4 +173,11 @@ if __name__ == "__main__":
             f.write(world((-3.0, 3.0), 0.0, (0.0, 3.0), course(dz=(centre, yaw)) + extra,
                           start_png=f"qr_start_{target}.png"))
         print(f"{path}: QR field centre {centre}, yaw {yaw:.0f} deg, target {target.upper()}"
+              f"  ->  run_mission.py --full --home -3 3")
+    for name, (dz, target, orange) in RETURN.items():
+        path = os.path.join(HERE, f"{name}.sdf")
+        with open(path, "w") as f:
+            f.write(world((-3.0, 3.0), 0.0, (0.0, 3.0), course(dz=dz, orange=orange),
+                          start_png=f"qr_start_{target}.png"))
+        print(f"{path}: orange entrance {orange[0]}, yaw {orange[1]:.0f} deg, target {target.upper()}"
               f"  ->  run_mission.py --full --home -3 3")

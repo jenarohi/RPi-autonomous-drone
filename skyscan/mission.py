@@ -82,6 +82,9 @@ class Mission:
         self.gmap: Optional[GroundMap] = None    # green floor seen so far (created at take-off)
         self.red_map: Optional[GroundMap] = None # red zone votes (created at take-off)
         self.start_ref = None                # start QR (or take-off) position: corridor entrance = nearer end
+        self.corr_name = C.FORWARD_CORRIDOR_NAME   # corridor being searched for now (green, later orange)
+        self.corr_colour = C.BANNER_COLOUR
+        self.map_red_while_searching = False       # return search: keep mapping red zones
         self.rejected = []                   # entrances of green strips that turned out not to be the corridor
         self._frame_seq = {"down": 0, "front": 0}
         self._last_img = None                # last down-camera frame
@@ -89,6 +92,7 @@ class Mission:
         self._overlay = []                   # (u, v, text) drawn in the viewer
         self._map_shown = 0.0
         self._leg_goal = None
+        self._search_deadline = 0.0
         self._speed = C.SPEED_TRANSIT
         self._guided = False
         self._t_flight = None
@@ -415,7 +419,7 @@ class Mission:
         img = self._last_img
         if img is None:
             return False
-        mask = vision.colour_mask(img[img.shape[0] // 2:], C.BANNER_COLOUR)
+        mask = vision.colour_mask(img[img.shape[0] // 2:], self.corr_colour)
         return (mask > 0).mean() > 0.05
 
     # ── green corridor: ground map built from every look ──────────────────
@@ -430,7 +434,7 @@ class Mission:
         if img is None:
             return False
         cam, h = (self.front, self.front_height(st)) if which == "front" else (self.cam, self.cam_height(st))
-        g = vision.colour_ground_samples(img, C.BANNER_COLOUR, cam, h, st.roll, st.pitch,
+        g = vision.colour_ground_samples(img, self.corr_colour, cam, h, st.roll, st.pitch,
                                          min(C.BANNER_MAX_RANGE, C.BANNER_RANGE_PER_M * h))
         c, s = math.cos(st.heading), math.sin(st.heading)
         self.gmap.add(np.column_stack([st.x + g[:, 0] * c + g[:, 1] * s,
@@ -450,7 +454,8 @@ class Mission:
     def corridor_strips(self, log: bool = False):
         """Corridor candidates in the map (nearest to the drone first) + partly seen blobs."""
         strips, partial, notes = self.gmap.strips(C.CORRIDOR_WIDTH, C.BANNER_MIN_LENGTH, self.start_ref,
-                                                  C.BANNER_MAP_VOTES, self.rejected)
+                                                  C.BANNER_MAP_VOTES, self.rejected,
+                                                  narrow_partial=self.map_red_while_searching)
         if log:
             for note in notes[:6]:
                 self.log("MAP", note)
@@ -482,6 +487,11 @@ class Mission:
 
     def _search_tick(self, st, hdg: float) -> Optional[str]:
         self.feed_map(st, "front", hdg)
+        if self.map_red_while_searching:
+            img = self.new_frame()
+            if (img is not None and self._map_red(st, img) and self._leg_goal
+                    and not segment_clear(st.xy, self._leg_goal, self.no_fly())):
+                return "replan"
         if self.blocked_ahead():
             self.v.velocity(0, 0, 0, hdg)
             self.log("BANNER", "something close ahead on the LiDAR - stopping this leg")
@@ -497,7 +507,7 @@ class Mission:
         st = self.st()
         hdg = math.atan2(p[1] - st.y, p[0] - st.x)
         self.settle(hdg)
-        self.fly_to(*p, C.ALT_ALIGN, hdg, tol=1.0, on_tick=lambda s: self._search_tick(s, hdg))
+        self.travel(p, C.ALT_ALIGN, hdg, on_tick=lambda s: self._search_tick(s, hdg), tol=1.0)
         self.spin360()
 
     def investigate(self, p):
@@ -512,16 +522,44 @@ class Mission:
             goal = (st.x + k * (p[0] - st.x), st.y + k * (p[1] - st.y))
             if self.inside_fence(goal):
                 self.settle(hdg)
-                self.fly_to(*goal, C.ALT_ALIGN, hdg, tol=1.0, on_tick=lambda s: self._search_tick(s, hdg))
+                self.travel(goal, C.ALT_ALIGN, hdg, on_tick=lambda s: self._search_tick(s, hdg), tol=1.0)
         for off in (0.0, 45.0, -45.0):
             self.look(wrap_pi(hdg + math.radians(off)))
+        if not self.map_red_while_searching:
+            return
+        # Tall walls hide the floor when seen from the side: go round the blob in 45 deg steps
+        # (a straight jump to the far side would cut through the walls) and look at it from
+        # every side; along the corridor axis the floor is visible through the opening.
+        st = self.st()
+        b0 = math.atan2(st.y - p[1], st.x - p[0])
+        for k in range(1, 8):
+            if self.corridor_strips()[0] or time.monotonic() > self._search_deadline:
+                return
+            b = b0 + k * math.pi / 4
+            q = (p[0] + C.RETURN_ORBIT_R * math.cos(b), p[1] + C.RETURN_ORBIT_R * math.sin(b))
+            if not self.inside_fence(q):
+                continue
+            face = math.atan2(p[1] - q[1], p[0] - q[0])
+            self.log("BANNER", f"circling the blob: looking from ({q[0]:.1f}, {q[1]:.1f})")
+            self.travel(q, C.ALT_ALIGN, face, on_tick=lambda s: self._search_tick(s, face), tol=1.0)
+            self.look(face)
 
-    def search_plan(self):
+    def search_plan(self, toward=None):
         """Escalating search from where we are now, always at 5 m: spin 360 here ->
         move out on rings, spinning 360 at each point. Yields (description, action)."""
         st = self.st()
         o, h0 = st.xy, st.heading
         yield "spin 360 here", self.spin360
+        if toward is not None:                       # the corridor lies somewhere on the way home
+            d = dist(o, toward)
+            b = math.atan2(toward[1] - o[1], toward[0] - o[0])
+            k = 1
+            while k * C.RETURN_SEARCH_STEP < d - 6.0:
+                p = (o[0] + k * C.RETURN_SEARCH_STEP * math.cos(b), o[1] + k * C.RETURN_SEARCH_STEP * math.sin(b))
+                if self.inside_fence(p):
+                    yield (f"moving {k * C.RETURN_SEARCH_STEP:.0f} m towards home to look again",
+                           lambda p=p: self.go_and_spin(p))
+                k += 1
         n = C.BANNER_SEARCH_BEARINGS
         order = [0] + [k for i in range(1, n // 2 + 1) for k in (i, -i)][:n - 1]
         for r in C.BANNER_SEARCH_RINGS:
@@ -616,8 +654,8 @@ class Mission:
         """Does the DOWN camera already show the corridor floor with its entrance edge
         ahead of us? Then no search is needed. None otherwise."""
         st = self.st()
-        guess = CorridorAxis(C.FORWARD_CORRIDOR_NAME, st.xy, body_to_world(st.x, st.y, st.heading, 10.0, 0.0),
-                             C.BANNER_COLOUR)
+        guess = CorridorAxis(self.corr_name, st.xy, body_to_world(st.x, st.y, st.heading, 10.0, 0.0),
+                             self.corr_colour)
         m = self.measure_entrance(guess)
         if m is None:
             return None
@@ -627,7 +665,7 @@ class Mission:
             return None                      # we would be flying back towards the start: not the entrance
         return axis
 
-    def find_banner(self) -> Result:
+    def find_banner(self, toward=None, timeout: Optional[float] = None) -> Result:
         """Find the green corridor and get to its entrance at 5 m, deciding from what is seen:
           down cam: already shows the corridor + entrance edge -> straight to ALIGN
           search  : spin 360 with the front camera -> if nothing, search points on rings,
@@ -639,7 +677,8 @@ class Mission:
                     is updated, or dropped (back to searching) if it stops looking right
           handover: the DOWN camera sees the corridor floor near the entrance -> ALIGN
         Loops until the stage timeout."""
-        deadline = time.monotonic() + C.BANNER_SEARCH_TIMEOUT
+        deadline = time.monotonic() + (timeout or C.BANNER_SEARCH_TIMEOUT)
+        self._search_deadline = deadline
         self.set_speed(C.SPEED_TRANSIT)
         self.settle(self.st().heading)
         axis = self.down_cam_corridor()
@@ -649,7 +688,7 @@ class Mission:
             self.axes[axis.name] = axis
             return Result.SUCCESS
         self.log("BANNER", "down camera does not see the green corridor")
-        plan = self.search_plan()
+        plan = self.search_plan(toward)
         visited = []
         while time.monotonic() < deadline:
             strips, partial = self.corridor_strips(log=True)
@@ -667,7 +706,7 @@ class Mission:
                     break
                 self.log("BANNER", "candidate lost on the way in - searching again from here")
                 self.map_snapshot("green_map_lost")
-                plan = self.search_plan()
+                plan = self.search_plan(toward)
                 continue
             todo = [p for p in partial if all(dist(p, v) > 3.0 for v in visited)]
             if todo:
@@ -689,13 +728,13 @@ class Mission:
     def approach(self, strip: Strip, deadline: float) -> str:
         """Fly towards the entrance of `strip` in legs. Returns 'ready' (down camera has the
         corridor, or we are at the entrance), 'lost' or 'timeout'."""
-        name = C.FORWARD_CORRIDOR_NAME
+        name = self.corr_name
         self.set_speed(C.BANNER_APPROACH_SPEED)
         lost, hand = 0, {"n": 0}
         for _ in range(40):
             if time.monotonic() > deadline:
                 return "timeout"
-            axis = strip.axis(name, C.BANNER_COLOUR)
+            axis = strip.axis(name, self.corr_colour)
             goal = axis.from_sd(-C.APPROACH_DIST, 0.0)
             st = self.st()
             togo = dist(st.xy, goal)
@@ -746,7 +785,7 @@ class Mission:
         img = self.new_frame("down")
         if img is None or dist(st.xy, goal) > C.HANDOVER_DIST:
             return None
-        e = vision.entrance_edge(img, C.BANNER_COLOUR, self.cam, self.cam_height(st), st.roll, st.pitch)
+        e = vision.entrance_edge(img, self.corr_colour, self.cam, self.cam_height(st), st.roll, st.pitch)
         hand["n"] = hand["n"] + 1 if self.edge_ok(e) else 0
         return "down_sees" if hand["n"] >= C.HANDOVER_FRAMES else None
 
@@ -767,6 +806,7 @@ class Mission:
             self.fly_to(*start, C.ALT_ALIGN, axis.heading, tol=0.3)
         self.set_speed(C.SPEED_SCAN)
         crept = 0.0
+        rejected = []
         for attempt in range(1, C.ALIGN_ATTEMPTS + 2):
             self.settle(axis.heading)
             st = self.st()
@@ -792,9 +832,16 @@ class Mission:
             moved = dist(seen.entry, axis.entry)
             dyaw = wrap_pi(seen.heading - axis.heading)
             if moved > C.ALIGN_MAX_CORRECTION + 1.0 or abs(dyaw) > C.ALIGN_MAX_YAW_CORRECTION:
-                self.log("ALIGN", f"#{attempt}: rejected (entrance {moved:.2f} m / {math.degrees(dyaw):+.1f} deg "
-                                  f"off the estimate)")
-                continue
+                # a coarse prior (front-camera map of a half-hidden corridor) can be well off; the
+                # down camera at 5 m is sharper. The SAME odd measurement again and again is not noise.
+                same = [r for r in rejected if dist(r[0], seen.entry) < 0.3 and abs(wrap_pi(r[1] - seen.heading)) < math.radians(4)]
+                rejected.append((seen.entry, seen.heading))
+                if len(same) < C.ALIGN_TRUST_AFTER:
+                    self.log("ALIGN", f"#{attempt}: rejected (entrance {moved:.2f} m / {math.degrees(dyaw):+.1f} deg "
+                                      f"off the estimate)")
+                    continue
+                self.log("ALIGN", f"#{attempt}: same measurement {len(same) + 1}x ({moved:.2f} m / "
+                                  f"{math.degrees(dyaw):+.1f} deg off the estimate) - trusting the down camera")
             axis = seen
             st = self.st()
             s_now, d = axis.to_sd(*st.xy)
@@ -1137,6 +1184,33 @@ class Mission:
         self.log.snapshot("delivery", self._last_img)
         return Result.SUCCESS
 
+    def find_return(self) -> Result:
+        """Find the orange (return) corridor with the cameras - no coordinates. Same method
+        as the green one (front-camera ground map, 360 spin, search points), but from the
+        delivery zone: the entrance is the strip end nearest to us, and the first search
+        points lie on the way home. Red zones stay mapped and avoided meanwhile."""
+        ret = C.RETURN_CORRIDOR
+        self.corr_name, self.corr_colour = ret["name"], ret["colour"]
+        self.gmap = GroundMap(self.st().xy)
+        self.start_ref = self.st().xy
+        self.rejected = []
+        self.map_red_while_searching = True
+        self.set_speed(C.SPEED_TRANSIT)
+        st = self.st()
+        if abs(st.alt - C.ALT_ALIGN) > 0.5 and st.alt < C.ALT_ALIGN + 0.5:
+            self.fly_to(st.x, st.y, C.ALT_ALIGN, st.heading, tol=0.6)
+        left = C.ABORT_AT - (time.monotonic() - self._t_flight) - C.RETURN_RESERVE_S
+        if left < 20.0:
+            self.log("MISSION", f"only {left:.0f} s of search budget left - cannot look for the corridor")
+            return Result.TIMEOUT
+        r = self.find_banner(toward=C.HOME_XY, timeout=min(C.RETURN_SEARCH_TIMEOUT, left))
+        self.map_red_while_searching = False
+        if r is not Result.SUCCESS and C.RETURN_FALLBACK_TO_SURVEY:
+            self.log("MISSION", "return corridor not found by camera - using the surveyed axis")
+            self.axes[ret["name"]] = CorridorAxis.from_config(ret)
+            return self.to_return_corridor()
+        return r
+
     def to_return_corridor(self) -> Result:
         axis = CorridorAxis.from_config(C.RETURN_CORRIDOR)
         self.set_speed(C.SPEED_TRANSIT)
@@ -1212,10 +1286,9 @@ class Mission:
             plan += [
                 ("SEARCH", self.search, 0, None),             # loops internally until SEARCH_TIMEOUT
                 ("DELIVER", self.deliver, R, None),
-                ("TO_RETURN_CORRIDOR", self.to_return_corridor, R, None),
-                ("ALIGN_RETURN", lambda: self.align(CorridorAxis.from_config(C.RETURN_CORRIDOR)), R,
-                 "TO_RETURN_CORRIDOR"),
-                ("CORRIDOR_RETURN", lambda: self.traverse(ret), R, "TO_RETURN_CORRIDOR"),
+                ("FIND_RETURN", self.find_return, 0, None),
+                ("ALIGN_RETURN", lambda: self.align(self.axes[ret]), R, "FIND_RETURN"),
+                ("CORRIDOR_RETURN", lambda: self.traverse(ret), R, "FIND_RETURN"),
                 ("HOME_LAND", self.home_land, 0, None),
             ]
         else:

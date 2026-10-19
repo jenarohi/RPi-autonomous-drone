@@ -182,9 +182,17 @@ PAYLOAD_SERVO = None        # e.g. (9, 1900) -> MAV_CMD_DO_SET_SERVO on release
 
 # ── Mission ────────────────────────────────────────────────────────────────
 MISSION_TIME_LIMIT = 15 * 60.0
-ABORT_AT = 14 * 60.0        # leave a minute for RTL
+ABORT_AT = 9.5 * 60.0       # battery ~10-11 min of hover: RTL from here
 STAGE_RETRIES = 1           # each failed stage is retried once ...
 RECOVER_ALT = 7.0           # ONLY when a corridor attempt fails between the walls: climb clear of them
 MAX_FALLBACKS = 3          # ... then up to this many times the mission goes back to an
                             # earlier stage (e.g. corridor failed -> search again), then RTL
 TELEMETRY_MAX_AGE = 1.0
+
+# ── Return (orange) corridor search ────────────────────────────────────────
+RETURN_SEARCH_TIMEOUT = 150.0     # s for the whole FIND_RETURN stage (battery budget)
+RETURN_SEARCH_STEP = 12.0         # search points every this many metres on the way home
+RETURN_FALLBACK_TO_SURVEY = False # True: if the camera search fails, fly to RETURN_CORRIDOR coordinates
+RETURN_ORBIT_R = 9.0              # m: look at a half-hidden corridor blob from this far, from its other sides
+RETURN_RESERVE_S = 120.0          # s kept for corridor + landing after the search
+ALIGN_TRUST_AFTER = 2           # the same out-of-range down-camera measurement this many extra times is accepted

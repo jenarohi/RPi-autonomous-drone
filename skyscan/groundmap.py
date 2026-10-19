@@ -85,7 +85,7 @@ class GroundMap:
         return out
 
     def strips(self, width: float, min_length: float, ref: Point, min_votes: int = 2,
-               rejected: Sequence[Point] = ()) -> Tuple[List[Strip], List[Point], List[str]]:
+               rejected: Sequence[Point] = (), narrow_partial: bool = False) -> Tuple[List[Strip], List[Point], List[str]]:
         """-> (corridor candidates nearest-first, centres of plausible but too-short
         blobs worth a closer look, notes on everything rejected)."""
         cc = self._components(min_votes)
@@ -118,6 +118,9 @@ class GroundMap:
             why = None
             if wid > 1.35 * width:
                 why = "too wide (grass / big patch)"
+            elif wid < 0.65 * width and length >= min_length and narrow_partial:
+                partial.append(centre)                          # tall walls can hide most of the floor
+                why = "narrow - floor may be hidden behind walls, worth a look from the other sides"
             elif wid < 0.65 * width and length >= min_length:
                 why = "too narrow (mat / line)"
             elif fill < 0.6:
