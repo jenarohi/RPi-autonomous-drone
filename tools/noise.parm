@@ -1,0 +1,6 @@
+# real-world-ish sensor errors for the simulator (the clean sim hides them)
+SIM_GPS1_NOISE 1.5
+SIM_GPS1_ACC 1.0
+SIM_DRIFT_SPEED 0.3
+SIM_DRIFT_TIME 8
+SIM_MAG_RND 30

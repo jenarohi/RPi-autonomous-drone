@@ -200,3 +200,8 @@ RETURN_STAGE_AHEAD = 12.0         # m beyond the forward corridor exit: where we
 RETURN_STAGE_LATERAL = (0.0, 9.0, -9.0, 17.0, -17.0)   # m to the side of the forward axis (left positive)
 LAND_FAST_TO_ALT = 1.2        # m: descend at LAND_FAST_SPEED down to here, then LAND mode
 LAND_FAST_SPEED = 1.0         # m/s
+
+# -- Camera / pose timing (a frame must be paired with the drone pose at EXPOSURE time) -----------------
+import os as _os
+CAM_LATENCY_S = float(_os.environ.get("SKYSCAN_LATENCY_COMP", "0.0"))     # camera latency compensated by the mission
+SIM_CAM_LATENCY_S = float(_os.environ.get("SKYSCAN_SIM_LATENCY", "0.0"))  # simulator only: delay frames by this

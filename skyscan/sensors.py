@@ -6,6 +6,7 @@ class offering the same frame() / scan() methods (USB camera + RPLidar).
 """
 import threading
 import time
+from collections import deque
 from typing import Optional, Tuple
 
 import cv2
@@ -38,6 +39,7 @@ class GzSensors:
         self._img = {"down": None, "front": None}       # latest Image message per camera
         self._img_t = {"down": 0.0, "front": 0.0}
         self._img_seq = {"down": 0, "front": 0}
+        self._img_q = {"down": deque(maxlen=60), "front": deque(maxlen=60)}   # (arrival, msg, seq): latency injection
         self._scan: Optional[LaserScan] = None
         self._scan_t = 0.0
         self._scan_seq = 0
@@ -65,6 +67,7 @@ class GzSensors:
         with self._lock:
             self._img[which], self._img_t[which] = msg, time.monotonic()
             self._img_seq[which] += 1
+            self._img_q[which].append((self._img_t[which], msg, self._img_seq[which]))
 
     def _on_scan(self, msg: LaserScan):
         with self._lock:
@@ -75,6 +78,13 @@ class GzSensors:
         """(BGR image, arrival time, sequence number) of camera "down" or "front"."""
         with self._lock:
             msg, t, seq = self._img[which], self._img_t[which], self._img_seq[which]
+            L = C.SIM_CAM_LATENCY_S
+            if L > 0.0:                       # simulator: hand out the newest frame that is at least L old
+                ok = [x for x in self._img_q[which] if x[0] <= time.monotonic() - L]
+                if not ok:
+                    return None, 0.0, 0
+                t, msg, seq = ok[-1]
+                t = t + L                     # time it becomes available (exposure time + latency)
         if msg is None:
             return None, 0.0, 0
         a = np.frombuffer(msg.data, np.uint8)

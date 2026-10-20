@@ -8,6 +8,7 @@ ground (capture_home) and the world frame is anchored to config.HOME_XY.
 """
 import math
 import threading
+from collections import deque
 import time
 from dataclasses import dataclass
 
@@ -55,6 +56,7 @@ class Vehicle:
         self._lpos = None          # (n, e, d, vn, ve, vd)
         self._lpos_t = 0.0
         self._att = None           # (roll, pitch, yaw NED) rad
+        self._hist = deque(maxlen=900)   # (monotonic time, lpos, att) for state_at()
         self._mode = "UNKNOWN"
         self._armed = False
         self._landed_state = None
@@ -77,7 +79,7 @@ class Vehicle:
         self.log("FC", f"heartbeat from system {self.sys} component {self.comp}")
         self._running = True
         threading.Thread(target=self._reader, daemon=True).start()
-        for msg_id, hz in ((M.MAVLINK_MSG_ID_LOCAL_POSITION_NED, 20), (M.MAVLINK_MSG_ID_ATTITUDE, 20),
+        for msg_id, hz in ((M.MAVLINK_MSG_ID_LOCAL_POSITION_NED, 25), (M.MAVLINK_MSG_ID_ATTITUDE, 50),
                            (M.MAVLINK_MSG_ID_EXTENDED_SYS_STATE, 2)):
             self.command(M.MAV_CMD_SET_MESSAGE_INTERVAL, msg_id, 1e6 / hz)
         while time.monotonic() < t_end and (self._lpos is None or self._att is None):
@@ -106,8 +108,12 @@ class Vehicle:
                 elif t == "LOCAL_POSITION_NED":
                     self._lpos = (msg.x, msg.y, msg.z, msg.vx, msg.vy, msg.vz)
                     self._lpos_t = time.monotonic()
+                    if self._att is not None:
+                        self._hist.append((self._lpos_t, self._lpos, self._att))
                 elif t == "ATTITUDE":
                     self._att = (msg.roll, msg.pitch, msg.yaw)
+                    if self._lpos is not None:
+                        self._hist.append((time.monotonic(), self._lpos, self._att))
                 elif t == "EXTENDED_SYS_STATE":
                     self._landed_state = msg.landed_state
             if t == "STATUSTEXT":
@@ -131,6 +137,39 @@ class Vehicle:
         return State(self.home_xy[0] + (e - e0), self.home_xy[1] + (n - n0), -(d - d0),
                      wrap_pi(math.pi / 2 - yaw), roll, pitch, ve, vn, -vd, mode, armed,
                      time.monotonic() - t)
+
+    def state_at(self, t: float) -> State:
+        """Pose at monotonic time `t` (e.g. the camera exposure), interpolated between the two telemetry
+        samples around it. The newest sample is used if `t` is newer than the history, the oldest if older."""
+        with self._lock:
+            h = list(self._hist)
+            mode, armed, tl = self._mode, self._armed, self._lpos_t
+        if len(h) < 2:
+            return self.state()
+        if t >= h[-1][0]:
+            a = b = h[-1]
+            w = 0.0
+        elif t <= h[0][0]:
+            a = b = h[0]
+            w = 0.0
+        else:
+            lo, hi = 0, len(h) - 1
+            while hi - lo > 1:
+                mid = (lo + hi) // 2
+                if h[mid][0] <= t:
+                    lo = mid
+                else:
+                    hi = mid
+            a, b = h[lo], h[hi]
+            w = (t - a[0]) / max(b[0] - a[0], 1e-6)
+        lp = [x + w * (y - x) for x, y in zip(a[1], b[1])]
+        r = a[2][0] + w * (b[2][0] - a[2][0])
+        p = a[2][1] + w * (b[2][1] - a[2][1])
+        yaw = a[2][2] + w * wrap_pi(b[2][2] - a[2][2])
+        n, e, d, vn, ve, vd = lp
+        n0, e0, d0 = self._origin if self._origin else (n, e, d)
+        return State(self.home_xy[0] + (e - e0), self.home_xy[1] + (n - n0), -(d - d0),
+                     wrap_pi(math.pi / 2 - yaw), r, p, ve, vn, -vd, mode, armed, time.monotonic() - tl)
 
     @property
     def mode(self) -> str:

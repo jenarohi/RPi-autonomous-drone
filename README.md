@@ -152,3 +152,31 @@ worlds/make_worlds.py challenge worlds (offset / behind / far / fake)
 skyscan/missionlog.py run logs
 tests/                offline unit tests + 2-D corridor simulator
 ```
+
+## Testing headless, fallbacks, camera timing (added)
+
+Headless simulator runs (Gazebo server + SITL, no window): `tools/fly_test.sh <name> <world.sdf> --home -3 3 --full`,
+`tools/fly_all.sh <suffix> <world>...` (logs in `/tmp/sitl_test/<world><suffix>.log`), `tools/summ.sh <suffix> <world>...`
+prints the key lines. `tools/fly_all_noise.sh` loads `tools/noise.parm` (GPS noise/drift, compass noise).
+`python3 tools/qr_error.py <log>` prints QR position error against the world truth, by drone speed.
+
+**Return corridor.** Found with the cameras, no coordinates (`FIND_RETURN`). The rulebook layout (Fig. 3) puts the
+orange corridor beside the green one, level with its exit, so the search first looks back at the corridor mouths from
+12 m beyond the forward exit at 0 / +-9 / +-17 m to the side, then falls back to the generic search. Tall walls hide the
+floor when seen from the side; looking along the axis (or from above) shows it.
+
+**Fallbacks.** SEARCH or DELIVER failing does not end the mission: it skips on to the return and landing (those
+still score). If centring on the target fails twice, the payload is released over the best estimate (`drop_at_estimate`).
+FIND_RETURN keeps its map between retries. Not enough flight time left (`ABORT_AT - RETURN_RESERVE_S`) -> RTL.
+FIND_RETURN failing -> RTL and land. Banner search limit 150 s, abort at 8 min (battery).
+
+**Camera timing.** Every image measurement is paired with the drone pose at the frame's exposure time
+(`Vehicle.state_at`, `Mission.frame_state`), not with the latest pose. Set the real camera latency in
+`config.CAM_LATENCY_S` (env `SKYSCAN_LATENCY_COMP`); better: use the camera's own capture timestamp. For the simulator
+`SKYSCAN_SIM_LATENCY` delays the frames to reproduce the real-world mismatch. Measured in `dz_ahead` (moving over 2 m/s, median error):
+0 s latency 0.10 m; 0.12 s uncompensated 0.64 m; compensated 0.09 m; 0.25 s uncompensated 1.52 m (mission failed); compensated 0.11 m;
+compensation off by 60 ms under / 80 ms over: 0.28 m.
+
+**Test worlds** (worlds/make_worlds.py): dz_* (QR field moved), rb_* (orange corridor mirrored / shifted as the rulebook
+says the layout may change), ret_* (orange corridor 14-17 m away, stress), fi_* (fault injection: no target code, no
+return corridor), offset/behind/far/fake (phase-1 challenges).

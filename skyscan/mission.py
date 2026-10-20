@@ -87,6 +87,7 @@ class Mission:
         self.map_red_while_searching = False       # return search: keep mapping red zones
         self.rejected = []                   # entrances of green strips that turned out not to be the corridor
         self._frame_seq = {"down": 0, "front": 0}
+        self._frame_t = {"down": 0.0, "front": 0.0}      # arrival time of the newest frame of each camera
         self._last_img = None                # last down-camera frame
         self._last_front = None              # last front-camera frame
         self._overlay = []                   # (u, v, text) drawn in the viewer
@@ -142,10 +143,11 @@ class Mission:
 
     def new_frame(self, which: str = "down"):
         """Latest frame of camera `which` if it has not been processed yet, else None."""
-        img, _, seq = self.s.frame(which)
+        img, t_frame, seq = self.s.frame(which)
         if img is None or seq == self._frame_seq[which]:
             return None
         self._frame_seq[which] = seq
+        self._frame_t[which] = t_frame
         if which == "down":
             H, W = img.shape[:2]
             self.cam_full.resize(W, H)
@@ -159,6 +161,13 @@ class Mission:
             self.front.resize(img.shape[1], img.shape[0])
             self._last_front = img
         return img
+
+    def frame_state(self, which: str = "down"):
+        """Drone pose at the EXPOSURE time of the newest frame of camera `which`: arrival time minus the
+        camera latency, looked up in the telemetry history. Pair every image measurement with this, not
+        with the latest pose - while the drone moves or tilts they differ."""
+        t = self._frame_t[which]
+        return self.v.state_at(t - C.CAM_LATENCY_S) if t > 0 else self.st()
 
     def cam_height(self, st) -> float:
         return max(0.3, st.alt + C.CAM_HEIGHT_OFFSET)
@@ -263,8 +272,11 @@ class Mission:
         return "timeout"
 
     # ══ perception helpers ═════════════════════════════════════════════════
-    def record_qr(self, data: str, p) -> bool:
+    def record_qr(self, data: str, p, pose=None) -> bool:
         """Store a delivery-zone QR sighting. True when the target just got confirmed."""
+        cur = self.st()
+        tilt = math.degrees(max(abs(pose.roll), abs(pose.pitch))) if pose else math.degrees(max(abs(cur.roll), abs(cur.pitch)))
+        self.log("QRFIX", f"{data} {p[0]:.2f} {p[1]:.2f} spd={math.hypot(cur.vx, cur.vy):.2f} tilt={tilt:.1f}")
         obs = self.qr_obs.setdefault(data, [])
         obs.append(p)
         if len(obs) == 1:
@@ -315,7 +327,8 @@ class Mission:
         if img is None:
             return None
         result = None
-        if self._map_red(st, img) and self._leg_goal and not segment_clear(st.xy, self._leg_goal, self.no_fly()):
+        sf = self.frame_state("down")
+        if self._map_red(sf, img) and self._leg_goal and not segment_clear(st.xy, self._leg_goal, self.no_fly()):
             result = "replan"
         if (self.heat is not None and st.alt > C.ALT_SEARCH - 1.5
                 and max(abs(st.roll), abs(st.pitch)) < math.radians(8)
@@ -328,7 +341,7 @@ class Mission:
         for hit in vision.decode_qrs(self._last_full):
             self._overlay.append((hit.u, hit.v, hit.data))
             if vision.parse_start_qr(hit.data) is None:
-                if self.record_qr(hit.data, self.pixel_to_world(st, hit.u, hit.v)) and not had_target:
+                if self.record_qr(hit.data, self.pixel_to_world(sf, hit.u, hit.v), sf) and not had_target:
                     result = "found"
         return result
 
@@ -353,8 +366,8 @@ class Mission:
         got, img_used = [], None
         t_end = time.monotonic() + timeout
         while len(got) < frames and time.monotonic() < t_end:
-            st = self.st()
             img = self.new_frame()
+            st = self.frame_state("down") if img is not None else self.st()
             if img is not None:
                 H = img.shape[0]
                 fa = vision.floor_axis(img, prior.colour)
@@ -399,8 +412,8 @@ class Mission:
         got, img_used = [], None
         t_end = time.monotonic() + timeout
         while len(got) < frames and time.monotonic() < t_end:
-            st = self.st()
             img = self.new_frame()
+            st = self.frame_state("down") if img is not None else self.st()
             if img is not None:
                 e = vision.entrance_edge(img, prior.colour, self.cam, self.cam_height(st), st.roll, st.pitch)
                 if self.edge_ok(e):
@@ -430,10 +443,11 @@ class Mission:
         while the drone is still yawing towards `heading` (pose would not match)."""
         if self.gmap is None:
             return False
-        if heading is not None and abs(wrap_pi(st.heading - heading)) > math.radians(3.0):
-            return False
         img = self.new_frame(which)
         if img is None:
+            return False
+        st = self.frame_state(which)                 # pose when this frame was exposed
+        if heading is not None and abs(wrap_pi(st.heading - heading)) > math.radians(3.0):
             return False
         cam, h = (self.front, self.front_height(st)) if which == "front" else (self.cam, self.cam_height(st))
         g = vision.colour_ground_samples(img, self.corr_colour, cam, h, st.roll, st.pitch,
@@ -667,7 +681,7 @@ class Mission:
                 votes[tgt] = votes.get(tgt, 0) + 1
                 if votes[tgt] >= C.QR_CONFIRMATIONS:
                     self.target_id = tgt
-                    p = self.pixel_to_world(s, hit.u, hit.v)
+                    p = self.pixel_to_world(self.frame_state("down"), hit.u, hit.v)
                     self.start_ref = p
                     self.log("QR", f"START QR '{hit.data}' at ({p[0]:.1f}, {p[1]:.1f}) -> deliver to '{tgt}'")
                     self.log.snapshot("start_qr", img)
@@ -822,7 +836,8 @@ class Mission:
         img = self.new_frame("down")
         if img is None or dist(st.xy, goal) > C.HANDOVER_DIST:
             return None
-        e = vision.entrance_edge(img, self.corr_colour, self.cam, self.cam_height(st), st.roll, st.pitch)
+        sf = self.frame_state("down")
+        e = vision.entrance_edge(img, self.corr_colour, self.cam, self.cam_height(sf), sf.roll, sf.pitch)
         hand["n"] = hand["n"] + 1 if self.edge_ok(e) else 0
         return "down_sees" if hand["n"] >= C.HANDOVER_FRAMES else None
 
@@ -1009,6 +1024,7 @@ class Mission:
                 self.sleep(0.05)
                 continue
             n += 1
+            st = self.frame_state("down")
             self._map_red(st, img)
             had = self.target_xy is not None
             hits = vision.decode_qrs(self._last_full)
@@ -1016,7 +1032,7 @@ class Mission:
             for hit in hits:
                 if vision.parse_start_qr(hit.data) is None:
                     seen.add(hit.data)
-                    if self.record_qr(hit.data, self.pixel_to_world(st, hit.u, hit.v)) and not had:
+                    if self.record_qr(hit.data, self.pixel_to_world(st, hit.u, hit.v), st) and not had:
                         found = True
             expect = self.cam_full.f / self.cam_height(st)            # px of a 1 m QR at the centre
             spots += [self.pixel_to_world(st, u, v)
@@ -1050,8 +1066,8 @@ class Mission:
             self.settle(look)
             n, t_end = 0, time.monotonic() + 3.0
             while n < 2 and time.monotonic() < t_end:
-                st = self.st()
                 img = self.new_frame("front")
+                st = self.frame_state("front") if img is not None else self.st()
                 if img is None or abs(wrap_pi(st.heading - look)) > math.radians(3):
                     self.sleep(0.05)
                     continue
@@ -1170,10 +1186,11 @@ class Mission:
             img = self.new_frame()
             if img is not None:
                 self._overlay = []
+                sf = self.frame_state("down")
                 for hit in vision.decode_qrs(self._last_full):
                     self._overlay.append((hit.u, hit.v, hit.data))
                     if vision.same_id(hit.data, self.target_id):
-                        p = self.pixel_to_world(st, hit.u, hit.v)
+                        p = self.pixel_to_world(sf, hit.u, hit.v)
                         est = (0.5 * est[0] + 0.5 * p[0], 0.5 * est[1] + 0.5 * p[1])
                         t_seen = time.monotonic()
             if time.monotonic() - t_seen > C.CENTRE_LOST_S:
