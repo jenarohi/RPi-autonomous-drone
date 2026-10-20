@@ -71,7 +71,7 @@ FIELD_QRS = {"a": (-17, 10), "b": (-9, -8), "c": (-1, 5), "d": (7, -12), "e": (1
 FIELD_REDS = [(-13, 6), (5, -5), (11, 4)]
 
 
-def field(centre=(39.0, 0.0), yaw_deg=0.0):
+def field(centre=(39.0, 0.0), yaw_deg=0.0, omit=()):
     """QR codes + red zones of the delivery field, placed at `centre`, rotated yaw_deg."""
     a = math.radians(yaw_deg)
 
@@ -79,14 +79,16 @@ def field(centre=(39.0, 0.0), yaw_deg=0.0):
         return (centre[0] + p[0] * math.cos(a) - p[1] * math.sin(a),
                 centre[1] + p[0] * math.sin(a) + p[1] * math.cos(a))
 
-    p = [qr(f"qr_{k}", *at(xy), f"qr_{k}.png") for k, xy in FIELD_QRS.items()]
+    p = [qr(f"qr_{k}", *at(xy), f"qr_{k}.png") for k, xy in FIELD_QRS.items() if k not in omit]
     p += [box(f"red{i + 1}", *at(xy), 0.008, 3, 3, 0.005, (0.9, 0.1, 0.1), yaw=a, solid=False)
           for i, xy in enumerate(FIELD_REDS)]
     return p
 
 
-def course(green_entry=(6.0, 3.0), green_yaw=0.0, dz=((39.0, 0.0), 0.0), orange=((16.0, -3.0), 180.0)):
+def course(green_entry=(6.0, 3.0), green_yaw=0.0, dz=((39.0, 0.0), 0.0), orange=((16.0, -3.0), 180.0), omit=()):
     p = corridor("green", green_entry, green_yaw, GREEN)
+    if orange is None:                      # fault injection: no return corridor at all
+        return p + field(*dz, omit=omit)
     (ex, ey), oyaw = orange
     p += corridor("orange", (ex, ey), oyaw, (0.95, 0.55, 0.05))
     th = math.radians(oyaw)
@@ -95,7 +97,7 @@ def course(green_entry=(6.0, 3.0), green_yaw=0.0, dz=((39.0, 0.0), 0.0), orange=
     for i, (sd, lat, sy) in enumerate(((3.0, -1.0, 1.0), (5.0, 1.0, 1.0), (7.0, -0.5, 1.2)), 1):
         p.append(box(f"obs{i}", ex + sd * t[0] + lat * n[0], ey + sd * t[1] + lat * n[1], 2.5,
                      0.4, sy, 5.0, (0.4, 0.4, 0.4), th))
-    return p + field(*dz)
+    return p + field(*dz, omit=omit)
 
 
 def paper(name, x, y):
@@ -157,6 +159,20 @@ RETURN = {
     "ret_south": (((39.0, 0.0), 0.0), "c", ((24.0, -14.0), 185.0)),
     "ret_north": (((45.0, -4.0), 30.0), "f", ((12.0, 15.0), 190.0)),
     "ret_near": (((39.0, 0.0), 0.0), "c", ((30.0, -2.0), 175.0)),
+    # layouts close to rulebook Fig. 3 (orange corridor beside the green one, same length, 6 m apart),
+    # mirrored / shifted because "layout is subject to change on event day"
+    "rb_north": (((39.0, 0.0), 0.0), "c", ((16.0, 9.0), 180.0)),
+    "rb_shift_e": (((39.0, 0.0), 0.0), "c", ((22.0, -3.0), 180.0)),
+    "rb_shift_w": (((39.0, 0.0), 0.0), "c", ((12.0, -3.0), 180.0)),
+    "rb_wide_s": (((39.0, 0.0), 0.0), "c", ((16.0, -6.0), 180.0)),
+}
+
+# Fault-injection worlds (the fallbacks must keep the mission safe and still score what they can)
+#   fi_no_target: the target code 'c' is not in the field   -> SEARCH fails, mission should skip on to the return + landing
+#   fi_no_return: there is no orange corridor at all        -> FIND_RETURN fails, mission aborts with RTL
+FAULTS = {
+    "fi_no_target": dict(dz=((39.0, 0.0), 0.0), target="c", orange=((16.0, -3.0), 180.0), omit=("c",)),
+    "fi_no_return": dict(dz=((39.0, 0.0), 0.0), target="c", orange=None, omit=()),
 }
 
 
@@ -181,3 +197,9 @@ if __name__ == "__main__":
                           start_png=f"qr_start_{target}.png"))
         print(f"{path}: orange entrance {orange[0]}, yaw {orange[1]:.0f} deg, target {target.upper()}"
               f"  ->  run_mission.py --full --home -3 3")
+    for name, f in FAULTS.items():
+        path = os.path.join(HERE, f"{name}.sdf")
+        with open(path, "w") as fh:
+            fh.write(world((-3.0, 3.0), 0.0, (0.0, 3.0), course(dz=f["dz"], orange=f["orange"], omit=f["omit"]),
+                           start_png=f"qr_start_{f['target']}.png"))
+        print(f"{path}: fault injection")

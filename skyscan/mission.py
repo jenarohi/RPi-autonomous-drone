@@ -93,6 +93,8 @@ class Mission:
         self._map_shown = 0.0
         self._leg_goal = None
         self._search_deadline = 0.0
+        self._return_map_started = False
+        self.degraded = []                    # stages that failed but were skipped to still score the return
         self._speed = C.SPEED_TRANSIT
         self._guided = False
         self._t_flight = None
@@ -544,6 +546,40 @@ class Mission:
             self.travel(q, C.ALT_ALIGN, face, on_tick=lambda s: self._search_tick(s, face), tol=1.0)
             self.look(face)
 
+    def go_and_look(self, p, face):
+        """Fly to p at 5 m facing `face` (front camera feeding the map on the way), then look
+        straight ahead and 25 deg to each side."""
+        self.travel(p, C.ALT_ALIGN, face, on_tick=lambda s: self._search_tick(s, face), tol=1.0)
+        for off in (0.0, 25.0, -25.0):
+            self.look(wrap_pi(face + math.radians(off)))
+
+    def return_search_plan(self):
+        """Search for the return corridor using the course layout (rulebook Fig. 3): it lies beside
+        the forward corridor, parallel to it, with its entrance on the delivery-zone side, roughly
+        level with the forward corridor's exit. Looking back at the corridor mouths from the
+        delivery-zone side, along their axis, shows the floor through the opening (tall walls hide
+        it from the side). Stops nearest first, far lateral ones last; the generic search follows
+        if none of them finds the corridor. Yields (description, action)."""
+        if self.exit_xy is None or self.exit_heading is None:
+            yield from self.search_plan(C.HOME_XY)
+            return
+        h = self.exit_heading
+        t, n = (math.cos(h), math.sin(h)), (-math.sin(h), math.cos(h))
+        face = wrap_pi(h + math.pi)
+        here = self.st().xy
+        stops = []
+        for d in C.RETURN_STAGE_LATERAL:
+            p = (self.exit_xy[0] + C.RETURN_STAGE_AHEAD * t[0] + d * n[0],
+                 self.exit_xy[1] + C.RETURN_STAGE_AHEAD * t[1] + d * n[1])
+            if self.inside_fence(p):
+                stops.append((d, p))
+        near = sorted([x for x in stops if abs(x[0]) <= 10.0], key=lambda x: dist(x[1], here))
+        far = sorted([x for x in stops if abs(x[0]) > 10.0], key=lambda x: dist(x[1], here))
+        for d, p in near + far:
+            yield (f"looking back at the corridor mouths from {C.RETURN_STAGE_AHEAD:.0f} m beyond the "
+                   f"forward exit, {d:+.0f} m to the side", lambda p=p: self.go_and_look(p, face))
+        yield from self.search_plan(C.HOME_XY)
+
     def search_plan(self, toward=None):
         """Escalating search from where we are now, always at 5 m: spin 360 here ->
         move out on rings, spinning 360 at each point. Yields (description, action)."""
@@ -665,7 +701,7 @@ class Mission:
             return None                      # we would be flying back towards the start: not the entrance
         return axis
 
-    def find_banner(self, toward=None, timeout: Optional[float] = None) -> Result:
+    def find_banner(self, toward=None, timeout: Optional[float] = None, planner=None) -> Result:
         """Find the green corridor and get to its entrance at 5 m, deciding from what is seen:
           down cam: already shows the corridor + entrance edge -> straight to ALIGN
           search  : spin 360 with the front camera -> if nothing, search points on rings,
@@ -688,7 +724,8 @@ class Mission:
             self.axes[axis.name] = axis
             return Result.SUCCESS
         self.log("BANNER", "down camera does not see the green corridor")
-        plan = self.search_plan(toward)
+        make_plan = planner or (lambda: self.search_plan(toward))
+        plan = make_plan()
         visited = []
         while time.monotonic() < deadline:
             strips, partial = self.corridor_strips(log=True)
@@ -706,7 +743,7 @@ class Mission:
                     break
                 self.log("BANNER", "candidate lost on the way in - searching again from here")
                 self.map_snapshot("green_map_lost")
-                plan = self.search_plan(toward)
+                plan = make_plan()
                 continue
             todo = [p for p in partial if all(dist(p, v) > 3.0 for v in visited)]
             if todo:
@@ -1191,9 +1228,11 @@ class Mission:
         points lie on the way home. Red zones stay mapped and avoided meanwhile."""
         ret = C.RETURN_CORRIDOR
         self.corr_name, self.corr_colour = ret["name"], ret["colour"]
-        self.gmap = GroundMap(self.st().xy)
-        self.start_ref = self.st().xy
-        self.rejected = []
+        if not self._return_map_started:                 # a retry keeps what was already seen / rejected
+            self.gmap = GroundMap(self.st().xy)
+            self.start_ref = self.st().xy
+            self.rejected = []
+            self._return_map_started = True
         self.map_red_while_searching = True
         self.set_speed(C.SPEED_TRANSIT)
         st = self.st()
@@ -1203,7 +1242,7 @@ class Mission:
         if left < 20.0:
             self.log("MISSION", f"only {left:.0f} s of search budget left - cannot look for the corridor")
             return Result.TIMEOUT
-        r = self.find_banner(toward=C.HOME_XY, timeout=min(C.RETURN_SEARCH_TIMEOUT, left))
+        r = self.find_banner(timeout=min(C.RETURN_SEARCH_TIMEOUT, left), planner=self.return_search_plan)
         self.map_red_while_searching = False
         if r is not Result.SUCCESS and C.RETURN_FALLBACK_TO_SURVEY:
             self.log("MISSION", "return corridor not found by camera - using the surveyed axis")
@@ -1221,12 +1260,38 @@ class Mission:
                         on_tick=self._scan_tick, tol=0.5)
         return Result.SUCCESS if r == "arrived" else Result.TIMEOUT
 
+    def _time_is_short(self) -> bool:
+        """Not enough flight time left to try the return corridor (reserve for corridor + landing)."""
+        return (self._t_flight is not None and
+                time.monotonic() - self._t_flight > C.ABORT_AT - C.RETURN_RESERVE_S)
+
+    def drop_at_estimate(self):
+        """Last resort when visual centring on the target failed twice: release over the best estimate of the
+        target. The accuracy marks are proportional, a rough drop still scores; skipping it scores nothing."""
+        self.log("DELIVER", "centring failed - releasing at the best estimate instead")
+        self.set_speed(C.SPEED_TRANSIT)
+        r = self.travel(self.target_xy, C.ALT_DELIVERY, self.search_heading, on_tick=self._scan_tick, tol=0.8)
+        if r != "arrived":
+            self.log("DELIVER", f"could not get over the estimate ({r}) - not releasing")
+            return
+        self.hold(C.PAYLOAD_LOWER_S, self.search_heading)
+        if C.PAYLOAD_SERVO:
+            self.v.set_servo(*C.PAYLOAD_SERVO)
+        st = self.st()
+        self.log("PAYLOAD", f"RELEASED (blind) at ({st.x:.2f}, {st.y:.2f}), alt {st.alt:.1f} m")
+
     def home_land(self) -> Result:
         self.set_speed(C.SPEED_TRANSIT)
         st = self.st()
         self.fly_to(st.x, st.y, C.ALT_HOME, st.heading, tol=0.5)
         if self.fly_to(*C.HOME_XY, C.ALT_HOME, st.heading, tol=0.3) != "arrived":
             return Result.TIMEOUT
+        t_end = time.monotonic() + 12.0
+        while self.st().alt > C.LAND_FAST_TO_ALT and time.monotonic() < t_end:
+            st = self.st()
+            self.v.velocity(clamp(0.5 * (C.HOME_XY[0] - st.x), -0.4, 0.4), clamp(0.5 * (C.HOME_XY[1] - st.y), -0.4, 0.4),
+                            -C.LAND_FAST_SPEED, st.heading)
+            self.sleep(0.1)
         self.log("LAND", "over the take-off point - LAND")
         self._guided = False
         self.v.set_mode("LAND")
@@ -1284,8 +1349,8 @@ class Mission:
         ]
         if full:
             plan += [
-                ("SEARCH", self.search, 0, None),             # loops internally until SEARCH_TIMEOUT
-                ("DELIVER", self.deliver, R, None),
+                ("SEARCH", self.search, 0, None, "FIND_RETURN"),   # loops internally until SEARCH_TIMEOUT
+                ("DELIVER", self.deliver, R, None, "FIND_RETURN"),
                 ("FIND_RETURN", self.find_return, 0, None),
                 ("ALIGN_RETURN", lambda: self.align(self.axes[ret]), R, "FIND_RETURN"),
                 ("CORRIDOR_RETURN", lambda: self.traverse(ret), R, "FIND_RETURN"),
@@ -1299,7 +1364,8 @@ class Mission:
         try:
             i, fallbacks = 0, 0
             while i < len(plan):
-                name, fn, retries, back = plan[i]
+                name, fn, retries, back, *rest = plan[i]
+                skip = rest[0] if rest else None
                 self.stage = name
                 for attempt in range(retries + 1):
                     t = time.monotonic()
@@ -1318,6 +1384,14 @@ class Mission:
                         self.recover()
                         i = names.index(back)
                         continue
+                    if skip and not self._time_is_short():
+                        if name == "DELIVER" and self.target_xy is not None:
+                            self.drop_at_estimate()
+                        self.degraded.append(name)
+                        self.log("MISSION", f"{name} failed - skipping on to {skip} (the return through the corridor "
+                                            f"and the landing still score)")
+                        i = names.index(skip)
+                        continue
                     raise Abort(f"{name} failed")
                 if name == stop_after and name != "HOME_LAND":
                     self.abort(f"stopping after {name} as requested", pilot=False)
@@ -1325,7 +1399,8 @@ class Mission:
                 i += 1
             flight = time.monotonic() - self._t_flight
             self.log("MISSION", f"MISSION COMPLETE - flight time {flight:.0f}s ({flight / 60:.1f} min), "
-                                f"delivered to '{self.target_id}'")
+                                + (f"delivered to '{self.target_id}'" if not self.degraded
+                                   else f"DEGRADED, failed and skipped: {', '.join(self.degraded)}"))
             return True
         except Abort as e:
             self.abort(str(e), e.pilot)

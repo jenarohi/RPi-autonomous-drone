@@ -93,7 +93,7 @@ BANNER_RANGE_PER_M = 4.0               # ... or than this many times the camera 
 BANNER_SEARCH_RINGS = (10.0, 20.0)     # 360 spin found nothing: move out on rings of these radii ...
 BANNER_SEARCH_BEARINGS = 8             # ... at this many bearings, spinning 360 deg at each
 BANNER_INVESTIGATE_DIST = 7.0          # partly seen green blob: get this close and look
-BANNER_SEARCH_TIMEOUT = 420.0          # whole FIND_BANNER stage (s)
+BANNER_SEARCH_TIMEOUT = 150.0          # whole FIND_BANNER stage (s)
 BANNER_BLOCKED_DIST = 1.5              # LiDAR return this close ahead while searching -> stop the leg
 BANNER_APPROACH_STEP = 4.0             # re-look every this many metres on the way in
 BANNER_APPROACH_SPEED = 2.5
@@ -182,7 +182,7 @@ PAYLOAD_SERVO = None        # e.g. (9, 1900) -> MAV_CMD_DO_SET_SERVO on release
 
 # ── Mission ────────────────────────────────────────────────────────────────
 MISSION_TIME_LIMIT = 15 * 60.0
-ABORT_AT = 9.5 * 60.0       # battery ~10-11 min of hover: RTL from here
+ABORT_AT = 8 * 60.0       # battery ~10-11 min of hover: RTL from here
 STAGE_RETRIES = 1           # each failed stage is retried once ...
 RECOVER_ALT = 7.0           # ONLY when a corridor attempt fails between the walls: climb clear of them
 MAX_FALLBACKS = 3          # ... then up to this many times the mission goes back to an
@@ -196,3 +196,7 @@ RETURN_FALLBACK_TO_SURVEY = False # True: if the camera search fails, fly to RET
 RETURN_ORBIT_R = 9.0              # m: look at a half-hidden corridor blob from this far, from its other sides
 RETURN_RESERVE_S = 120.0          # s kept for corridor + landing after the search
 ALIGN_TRUST_AFTER = 2           # the same out-of-range down-camera measurement this many extra times is accepted
+RETURN_STAGE_AHEAD = 12.0         # m beyond the forward corridor exit: where we look back at the corridor mouths from
+RETURN_STAGE_LATERAL = (0.0, 9.0, -9.0, 17.0, -17.0)   # m to the side of the forward axis (left positive)
+LAND_FAST_TO_ALT = 1.2        # m: descend at LAND_FAST_SPEED down to here, then LAND mode
+LAND_FAST_SPEED = 1.0         # m/s
