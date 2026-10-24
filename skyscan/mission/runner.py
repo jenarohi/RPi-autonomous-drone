@@ -10,7 +10,7 @@ from typing import Any, Callable
 from skyscan.bus import EventBus
 from skyscan.mission.context import Aborted, MissionContext
 from skyscan.mission.stage import Stage
-from skyscan.mission.stage_a import StageA1, StageA2, StageA3, StageA4
+from skyscan.mission.stage_a import StageA1, StageA2, StageA3, StageA4, StageA5
 from skyscan.mission.stage_b import StageB1, StageB2, StageB3, StageB4
 from skyscan.mission.stage_c import StageC1, StageC2, StageC3, StageC4
 from skyscan.mission.stage_d import StageD1, StageD2, StageD3
@@ -42,7 +42,7 @@ class MissionRunner:
         self.truth_fn = truth_fn
         self.lidar = lidar
 
-        self.stages: list[Stage] = [StageA1(), StageA2(), StageA3(), StageA4(),
+        self.stages: list[Stage] = [StageA1(), StageA2(), StageA3(), StageA4(), StageA5(),
                                     StageB1(), StageB2(), StageB3(), StageB4(),
                                     StageC1(), StageC2(), StageC3(), StageC4(),
                                     StageD1(), StageD2(), StageD3(),
@@ -102,7 +102,7 @@ class MissionRunner:
         return desc
 
     def _stage_cfg(self, stage: Stage) -> Any:
-        """``mission.stage_<letter>.<id>`` (stage_a for A1..A4, stage_b for B1..B4, ..., stage_e for E1..E6)."""
+        """``mission.stage_<letter>.<id>`` (stage_a for A1..A5, stage_b for B1..B4, ..., stage_e for E1..E6)."""
         mcfg = getattr(self.cfg, "mission", self.cfg)
         group = getattr(mcfg, f"stage_{stage.id[:1].lower()}", mcfg)
         return getattr(group, stage.id.lower(), {})

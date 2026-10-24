@@ -1,9 +1,10 @@
-"""Stage A implementations (A1–A4) for AeroTHON 2026 Pre-Corridor Operations.
+"""Stage A implementations (A1–A5) for AeroTHON 2026 Pre-Corridor Operations.
 
 A1: Autonomous Takeoff
 A2: Climb & Positioning (5m altitude, 1m forward)
 A3: Start QR Detection & Decoding (ground QR scan from 5m altitude)
 A4: Green Banner Detection & Entry Alignment (AeroTHON 2026 banner, align with corridor axis)
+A5: Safety Backup (1 m straight back from the entrance, before the descent to the corridor altitude)
 """
 from __future__ import annotations
 
@@ -655,4 +656,99 @@ class StageA4(Stage):
         if success:
             ctx.emit(f"A4 SUCCESS: aligned {fin['distance_m']:.1f} m before the corridor entrance "
                      f"(lateral {-fin['lateral_m']:+.2f} m, heading {-fin['yaw_err_deg']:+.1f} deg off the axis)", Sev.GOOD)
+        return success
+
+
+# ───────────────────────────── A5: Safety Backup ─────────────────────────────
+
+class StageA5(Stage):
+    id = "A5"
+    title = "Safety Backup"
+    rulebook = "Team safety step (not a rulebook stage): clear the entry arch before the descent to the corridor altitude"
+    summary = ("After A4, fly straight back 1 m along the corridor axis, facing the corridor, at the same altitude, so nothing "
+               "(entry arch, banner board, wall end) is in front of the vehicle when B1 descends. Then hold and check the new spot.")
+
+    def preconditions(self, ctx: MissionContext) -> list[Check]:
+        cfg = getattr(ctx.cfg, "a5", ctx.cfg)
+        st = ctx.state()
+        alt = st.rel_alt_m or 0.0
+        axis = ctx.mission.get("corridor_axis")
+        have_axis = isinstance(axis, dict) and axis.get("axis_heading_deg") is not None
+        return [
+            Check(name="Course frame established (A1)", ok=(ctx.course is not None), detail="origin recorded" if ctx.course else "run A1 first"),
+            Check(name="Vehicle airborne, armed, GUIDED", ok=bool(st.armed and alt > 1.0 and st.mode == "GUIDED"),
+                  detail=f"armed={st.armed} alt={alt:.1f} m mode={st.mode}"),
+            Check(name="Corridor axis measured (A4)", ok=have_axis,
+                  detail=f"axis heading {axis['axis_heading_deg']:.1f} deg" if have_axis else "run A4 first"),
+            Check(name=f"Backs up {float(getattr(cfg, 'back_m', 1.0)):.1f} m", ok=True, blocking=False,
+                  detail="straight back along the corridor axis"),
+        ]
+
+    def run(self, ctx: MissionContext) -> bool:
+        cfg = getattr(ctx.cfg, "a5", ctx.cfg)
+        back = float(getattr(cfg, "back_m", 1.0))
+        back_tol = float(getattr(cfg, "back_tol_m", 0.25))
+        lat_tol = float(getattr(cfg, "lateral_tol_m", 0.3))
+        yaw_tol = float(getattr(cfg, "yaw_tol_deg", 5.0))
+        alt_tol = float(getattr(cfg, "alt_tol_m", 0.4))
+        hold_s = float(getattr(cfg, "hold_s", 1.5))
+        timeout = float(getattr(cfg, "timeout_s", 25.0))
+        course = ctx.course
+        st = ctx.state()
+        axis = ctx.mission.get("corridor_axis")
+        if course is None or st.ned is None or st.yaw_deg is None:
+            ctx.emit("Cannot run A5 without the course frame and a position fix", Sev.ERROR)
+            return False
+        if not (isinstance(axis, dict) and axis.get("axis_heading_deg") is not None):
+            ctx.emit("Cannot run A5 without the corridor axis from A4", Sev.ERROR)
+            return False
+        heading = float(axis["axis_heading_deg"])
+        ax = (math.cos(math.radians(heading)), math.sin(math.radians(heading)))      # corridor axis, NED (north, east)
+        n0, e0, d0 = st.ned
+        truth0 = ((ctx.truth() or {}).get("corridor")) if ctx.truth else None
+        tgt = (n0 - back * ax[0], e0 - back * ax[1], d0, heading)
+        ctx.emit(f"Backing up {back:.1f} m along the corridor axis ({heading:.1f} deg), facing the corridor")
+        ctx.phase(f"Backing up {back:.1f} m")
+
+        reached = StageA4._fly_to(ctx, tgt, timeout, xy_tol=0.15, yaw_tol=yaw_tol * 0.6, alt_tol=alt_tol)
+        t_hold = time.time()
+        while reached and time.time() - t_hold < hold_s:                              # hold the new spot
+            ctx.check_abort()
+            ctx.link.goto_ned(tgt[0], tgt[1], tgt[2], yaw_deg=tgt[3])
+            time.sleep(0.2)
+
+        fin = ctx.state()
+        dn, de = fin.ned[0] - n0, fin.ned[1] - e0
+        moved_back = -(dn * ax[0] + de * ax[1])                                       # progress away from the corridor
+        cross = -dn * ax[1] + de * ax[0]                                              # sideways drift from the axis line
+        yaw_err = abs(ang_diff(fin.yaw_deg or 0.0, heading))
+        d_alt = abs(fin.ned[2] - d0)
+        ctx.metric("moved_back_m", round(moved_back, 2))
+        ctx.metric("lateral_drift_m", round(cross, 2))
+        ctx.metric("heading_error_deg", round(yaw_err, 1))
+        ctx.metric("altitude_change_m", round(d_alt, 2))
+        ctx.snapshot("front", "a5_safety_backup")
+        ctx.output("safety_backup", {"back_m": round(moved_back, 2), "axis_heading_deg": round(heading, 1),
+                                     "ned": [round(fin.ned[0], 2), round(fin.ned[1], 2)]})
+
+        criteria = [
+            Check(name=f"Moved straight back {back:.1f} m", ok=bool(reached and abs(moved_back - back) <= back_tol),
+                  value=round(moved_back, 2), limit=back),
+            Check(name="Stayed on the corridor axis line", ok=(abs(cross) <= lat_tol), value=round(abs(cross), 2), limit=lat_tol),
+            Check(name="Still facing along the corridor axis", ok=(yaw_err <= yaw_tol), value=round(yaw_err, 1), limit=yaw_tol),
+            Check(name="Altitude held (no descent yet)", ok=(d_alt <= alt_tol), value=round(d_alt, 2), limit=alt_tol),
+            Check(name="Armed and still in GUIDED", ok=bool(fin.armed and fin.mode == "GUIDED")),
+        ]
+        truth1 = ((ctx.truth() or {}).get("corridor")) if ctx.truth else None
+        if truth0 and truth1:
+            grew = (-truth1["along_axis_m"]) - (-truth0["along_axis_m"])
+            ctx.metric("truth_entrance_distance_change_m", round(grew, 2))
+            criteria.append(Check(name="Truth: entrance is now further away by the backup distance",
+                                  ok=(abs(grew - back) <= back_tol + 0.15), blocking=False,
+                                  detail=f"entrance distance grew {grew:.2f} m (backup {back:.1f} m)"))
+        ctx.report.criteria = criteria
+        success = all(c.ok for c in criteria if c.blocking)
+        if success:
+            ctx.emit(f"A5 SUCCESS: backed up {moved_back:.2f} m along the axis (drift {cross:+.2f} m, "
+                     f"heading error {yaw_err:.1f} deg); B1 can descend", Sev.GOOD)
         return success

@@ -27,7 +27,30 @@ def _n(v: float) -> str:
     return f"{round(float(v), 6):g}"
 
 
+def _banner(o: CourseObject, course: Course) -> str:
+    """A foam board: white board of the full size, coloured face inset by the white border (``border``), visual only."""
+    x, y, z = course.course_to_gz(o.fwd, o.right, o.up)
+    sx, sy, sz = o.size
+    b = float(o.extras.get("border", 0.0254))
+    r, g, c = (_n(v) for v in o.rgb)
+    if o.extras.get("face_axis", "x") == "x":   # upright board: thin along the corridor axis
+        face = (sx + 0.002, sy - 2 * b, sz - 2 * b)
+    else:                                        # board lying on the ground: thin along z
+        face = (sx - 2 * b, sy - 2 * b, sz + 0.002)
+    fs = f"<size>{_n(face[0])} {_n(face[1])} {_n(face[2])}</size>"
+    return (
+        f'<model name="{o.id}"><static>true</static><pose>{_n(x)} {_n(y)} {_n(z)} 0 0 0</pose><link name="l">'
+        f'<visual name="border"><geometry><box><size>{_n(sx)} {_n(sy)} {_n(sz)}</size></box></geometry>'
+        f'<material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material></visual>'
+        f'<visual name="face"><geometry><box>{fs}</box></geometry>'
+        f'<material><ambient>{r} {g} {c} 1</ambient><diffuse>{r} {g} {c} 1</diffuse></material></visual>'
+        f"</link></model>"
+    )
+
+
 def _model(o: CourseObject, course: Course) -> str:
+    if o.type == "banner":
+        return _banner(o, course)
     x, y, z = course.course_to_gz(o.fwd, o.right, o.up)
     sx, sy, sz = o.size
     r, g, b = (_n(c) for c in o.rgb)

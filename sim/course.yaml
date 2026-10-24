@@ -31,9 +31,23 @@ objects:
   - {id: green_wR, type: wall, label: "Green corridor wall (right)", fwd: 14.0, right: 1.75, up: 2.5,
      size: [10.0, 0.2, 5.0], rgb: [0.65, 0.65, 0.65], collision: true}
 
+  # --- entry / exit banners (rulebook "Field Properties - Mission 2", not part of the legacy world) -----------------
+  # Foam boards 11.5 ft (3.505 m) wide, 1 in (0.0254 m) white border inside the stated size. Arch boards stand across
+  # the corridor, top flush with the wall tops (5 m), print facing the approach (west). Ground boards lie 1 ft x 11.5 ft on
+  # the approach side of their arch. Entry = green #00B140 at the green corridor start (x=6). The exit corridor (the former orange one, floor now blue #0000FF) has the
+  # blue arch + ground board at its entrance (x=16, where the return lap comes in from the east); the green corridor has no exit banner.
+  - {id: banner_entry_arch, type: banner, mount: arch, lap: forward, label: "Entry corridor arch (green)", fwd: 8.989, right: 0.0, up: 4.7714,
+     size: [0.02, 3.5052, 0.4572], rgb: [0.0, 0.6941, 0.251], border: 0.0254, face_axis: x}
+  - {id: banner_entry_ground, type: banner, mount: ground, lap: forward, label: "Entry ground banner (green)", fwd: 8.8456, right: 0.0, up: 0.005,
+     size: [0.3048, 3.5052, 0.01], rgb: [0.0, 0.6941, 0.251], border: 0.0254, face_axis: z}
+  - {id: banner_exit_arch, type: banner, mount: arch, lap: return, label: "Exit corridor arch (blue)", fwd: 19.011, right: 6.0, up: 4.7714,
+     size: [0.02, 3.5052, 0.4572], rgb: [0.0, 0.0, 1.0], border: 0.0254, face_axis: x}
+  - {id: banner_exit_ground, type: banner, mount: ground, lap: return, label: "Exit ground banner (blue)", fwd: 19.1544, right: 6.0, up: 0.005,
+     size: [0.3048, 3.5052, 0.01], rgb: [0.0, 0.0, 1.0], border: 0.0254, face_axis: z}
+
   # --- orange corridor (return lap) with obstacles ---------------------------------------------------------
-  - {id: orange_floor, type: floor, label: "Orange corridor floor", fwd: 14.0, right: 6.0, up: 0.005,
-     size: [10.0, 3.5, 0.01], rgb: [0.95, 0.55, 0.05], collision: true, corridor: orange}
+  - {id: orange_floor, type: floor, label: "Exit corridor floor (blue, was orange)", fwd: 14.0, right: 6.0, up: 0.005,
+     size: [10.0, 3.5, 0.01], rgb: [0.0, 0.0, 1.0], collision: true, corridor: orange}
   - {id: orange_wL, type: wall, label: "Orange corridor wall (left)", fwd: 14.0, right: 4.25, up: 2.5,
      size: [10.0, 0.2, 5.0], rgb: [0.65, 0.65, 0.65], collision: true}
   - {id: orange_wR, type: wall, label: "Orange corridor wall (right)", fwd: 14.0, right: 7.75, up: 2.5,

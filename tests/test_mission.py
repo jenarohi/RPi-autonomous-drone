@@ -69,15 +69,15 @@ def test_runner_executes_stages():
     vision = MockVision()
 
     runner = MissionRunner(cfg, bus, link, vision)
-    assert [s.id for s in runner.stages] == ["A1", "A2", "A3", "A4", "B1", "B2", "B3", "B4", "C1", "C2", "C3", "C4", "D1", "D2", "D3",
+    assert [s.id for s in runner.stages] == ["A1", "A2", "A3", "A4", "A5", "B1", "B2", "B3", "B4", "C1", "C2", "C3", "C4", "D1", "D2", "D3",
                                               "E1", "E2", "E3", "E4", "E5", "E6"]
     desc = runner.describe()
-    assert len(desc) == 21 and desc[0]["id"] == "A1" and desc[4]["id"] == "B1" and desc[8]["id"] == "C1" and desc[12]["id"] == "D1"
-    assert desc[4]["config"]["corridor_alt_m"] == 3.0       # stage_b config group is wired to B1..B4
-    assert desc[8]["config"]["entry"] == [23.0, 0.0]        # stage_c config group is wired to C1..C4
-    assert desc[12]["config"]["clearance_m"] == 3.0         # stage_d config group is wired to D1..D3
-    assert desc[16]["config"]["max_search_m"] == 14.0       # stage_e config group is wired to E1..E6
-    assert desc[20]["config"]["handover_alt_m"] == 1.0
+    assert len(desc) == 22 and desc[0]["id"] == "A1" and desc[4]["id"] == "A5" and desc[5]["id"] == "B1" and desc[9]["id"] == "C1" and desc[13]["id"] == "D1"
+    assert desc[5]["config"]["corridor_alt_m"] == 3.0       # stage_b config group is wired to B1..B4
+    assert desc[9]["config"]["entry"] == [23.0, 0.0]        # stage_c config group is wired to C1..C4
+    assert desc[13]["config"]["clearance_m"] == 3.0         # stage_d config group is wired to D1..D3
+    assert desc[17]["config"]["max_search_m"] == 14.0       # stage_e config group is wired to E1..E6
+    assert desc[21]["config"]["handover_alt_m"] == 1.0
 
     # Run A1
     ok, msg = runner.run(["A1"])
@@ -92,7 +92,7 @@ def test_preview_is_an_instant_go_nogo_per_stage():
     t0 = time.time()
     pre = runner.preview()
     assert time.time() - t0 < 1.0, "preview must never wait for the vehicle"
-    assert list(pre) == ["A1", "A2", "A3", "A4", "B1", "B2", "B3", "B4", "C1", "C2", "C3", "C4", "D1", "D2", "D3",
+    assert list(pre) == ["A1", "A2", "A3", "A4", "A5", "B1", "B2", "B3", "B4", "C1", "C2", "C3", "C4", "D1", "D2", "D3",
                                               "E1", "E2", "E3", "E4", "E5", "E6"]
 
     def go(sid):
@@ -100,7 +100,7 @@ def test_preview_is_an_instant_go_nogo_per_stage():
 
     assert go("A1")                      # on the ground, EKF ok, disarmed
     assert not go("A2")                  # no course frame yet
-    assert not go("A3") and not go("A4")
+    assert not go("A3") and not go("A4") and not go("A5")
     assert not go("B1") and not go("B2") and not go("B3") and not go("B4")   # nothing flying, no lidar
     assert not go("C1") and not go("C2") and not go("C3") and not go("C4")   # nothing flying, no camera frames, no start QR
     assert not go("D1") and not go("D2") and not go("D3")                    # nothing flying, no course frame

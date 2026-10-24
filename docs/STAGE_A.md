@@ -98,3 +98,22 @@ Vision details: `skyscan/vision/corridor.py`. The measured pose is validated aga
 
 All numbers are in `config/skyscan.yaml` under `mission.stage_a`, `vision`, `cameras` and `sim`. Nothing about the
 course is hard-coded in the mission logic; it works in the course frame recorded by A1.
+
+## A5 - Safety Backup (between A4 and B1)
+
+A team safety step, not a rulebook stage. A4 leaves the vehicle hovering about 4 m before the corridor entrance at the 5 m scan
+altitude, which is right in front of the entry arch (top flush with the 5 m wall tops). Before B1 descends to the 3 m corridor
+altitude, A5 flies **straight back 1 m along the corridor axis** (A4\x27s measured axis heading, so the vehicle keeps facing the corridor),
+at the same altitude, then holds 1.5 s.
+
+| criterion | limit |
+|---|---|
+| Moved straight back | 1.0 m +- 0.25 |
+| Sideways drift from the axis line | <= 0.3 m |
+| Heading vs the corridor axis | <= 5 deg |
+| Altitude change (no descent) | <= 0.4 m |
+| Armed, GUIDED | - |
+| Truth (sim, non-blocking): entrance distance grew by the backup distance | +- 0.4 m |
+
+Needs A1 (course frame) and A4 (product `corridor_axis`). Config: `mission.stage_a.a5` (`back_m`, tolerances, `hold_s`, `timeout_s`).
+Product: `safety_backup`. B1 descends from wherever A5 left the vehicle, so B1 itself is unchanged.

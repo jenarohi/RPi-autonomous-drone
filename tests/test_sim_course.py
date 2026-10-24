@@ -73,6 +73,8 @@ def _models(sdf_path):
     """{name: (static, pose, size, ambient, diffuse, has_collision, albedo)} for every box model."""
     out = {}
     for m in ET.parse(sdf_path).getroot().iter("model"):
+        if m.get("name", "").startswith("banner_"):  # rulebook foam boards, added on top of the legacy world
+            continue
         vis = m.find("link/visual")
         if vis is None:
             continue
@@ -100,6 +102,9 @@ def test_generated_world_is_the_legacy_world(tmp_path):
     new = build_world(out_file=tmp_path / "w.sdf")
     legacy = REPO / "legacy" / "aerothon_mission.sdf"
     got, want = _models(new), _models(legacy)
+    # rulebook change: the exit (former orange) corridor floor is blue #0000FF; everything else is the legacy world
+    st, pose, size, _, _, coll, alb = want["orange_floor"]
+    want["orange_floor"] = (st, pose, size, (0.0, 0.0, 1.0, 1.0), (0.0, 0.0, 1.0, 1.0), coll, alb)
     assert set(got) == set(want), f"model sets differ: only new {set(got) - set(want)}, only legacy {set(want) - set(got)}"
     for name in want:
         assert got[name] == want[name], f"{name}: {got[name]} != legacy {want[name]}"
@@ -132,3 +137,23 @@ def test_course_yaml_matches_legacy_geometry():
     ent = c.corridors["forward"]["entrance"]
     assert c.course_to_gz(ent[0], ent[1], 0.0)[:2] == (6.0, 3.0)
     assert c.corridors["forward"]["width_m"] == 3.5 and c.corridors["forward"]["length_m"] == 10.0
+
+
+def test_banners_are_in_the_world(tmp_path):
+    from sim.build_world import build_world
+
+    root = ET.parse(build_world(out_file=tmp_path / "w.sdf")).getroot()
+    c = Course.from_yaml(REPO / "sim" / "course.yaml")
+    ban = {o.id: o for o in c.objects if o.type == "banner"}
+    assert set(ban) == {"banner_entry_arch", "banner_entry_ground", "banner_exit_arch", "banner_exit_ground"}
+    for name, o in ban.items():
+        m = root.find(f"world/model[@name=\x27{name}\x27]")
+        assert m is not None and m.find("link/collision") is None
+        board, face = (v.find("geometry/box/size").text.split() for v in m.findall("link/visual"))
+        assert [round(float(v), 4) for v in board] == [round(v, 4) for v in o.size]   # 11.5 ft x 1.5 ft / 1 ft
+        assert round(float(face[1]), 4) == round(o.size[1] - 2 * 0.0254, 4)           # 1 in white border all round
+    assert ban["banner_entry_arch"].size[1:] == [3.5052, 0.4572] and ban["banner_exit_ground"].size[:2] == [0.3048, 3.5052]
+    # arches sit on the wall tops (5 m): green across the green corridor start, blue across the exit corridor entrance
+    for name, fwd, right in (("banner_entry_arch", 9.0, 0.0), ("banner_exit_arch", 19.0, 6.0)):
+        assert abs(ban[name].fwd - fwd) < 0.02 and ban[name].right == right and abs(ban[name].up + ban[name].size[2] / 2 - 5.0) < 1e-3
+    assert ban["banner_entry_ground"].right == 0.0 and ban["banner_exit_ground"].right == 6.0

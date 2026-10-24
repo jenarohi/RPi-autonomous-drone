@@ -1265,8 +1265,8 @@ function drawCourseMap() {
         ctx.font = '10px monospace';
         ctx.fillText(obj.id === 'start_qr' ? 'QR' : obj.label[0], sx - 4, sy + 4);
       } else if (obj.type === 'banner') {
-        ctx.fillStyle = '#10b981';
-        ctx.fillRect(sx - 2, sy - sh / 2, 4, sh);
+        if (obj.mount === 'ground') ctx.fillRect(sx - sw / 2, sy - sh / 2, sw, sh);
+        else ctx.fillRect(sx - 2, sy - sh / 2, 4, sh);   // upright arch board, seen edge-on from above
       } else if (obj.type === 'wall' || obj.type === 'floor' || obj.type === 'restricted') {
         ctx.fillRect(sx - sw / 2, sy - sh / 2, sw, sh);
       } else if (obj.type === 'obstacle') {

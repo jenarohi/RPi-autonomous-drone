@@ -196,6 +196,16 @@ mission:
       max_travel_m: 15           # refuse alignment targets further than this from the start
       timeout_s: 150
 
+    a5:
+      title: Safety Backup
+      back_m: 1.0                # fly this far straight back along the corridor axis before B1 descends
+      back_tol_m: 0.25
+      lateral_tol_m: 0.3         # sideways drift from the axis line allowed
+      yaw_tol_deg: 5.0           # still facing along the axis
+      alt_tol_m: 0.4             # no descent in this stage
+      hold_s: 1.5                # hold the new spot this long
+      timeout_s: 25
+
   stage_b:
     b1:
       title: Descent to Corridor Altitude
